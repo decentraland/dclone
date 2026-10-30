@@ -253,6 +253,7 @@ async fn authenticated(server: &Server) -> WsStream {
     let (_, frame) = frame_signed(
         &PrivateKeySigner::random(),
         &PrivateKeySigner::random(),
+        FAR_EXPIRATION,
         ts,
         &payload,
         "{}",
