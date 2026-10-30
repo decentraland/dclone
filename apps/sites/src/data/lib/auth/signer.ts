@@ -1,3 +1,5 @@
+import { sha256 } from "@noble/hashes/sha2.js";
+import { bytesToHex } from "@noble/hashes/utils.js";
 import {
   AUTH_CHAIN_HEADER_PREFIX,
   AUTH_METADATA_HEADER,
@@ -71,7 +73,14 @@ export async function signedFetch(
 ): Promise<Response> {
   const { metadata, headers: initHeaders, signPath, ...rest } = init;
   const method = (init.method ?? "GET").toUpperCase();
-  const signed = await signRequest(identity, method, signPath ?? input, metadata ?? {});
+  let signedMetadata = metadata ?? {};
+  // Schedule JSON remains supported beside typed envelopes, but its exact body
+  // and one-use request identity must be covered by the signed metadata.
+  if ((method === "POST" || method === "PATCH") && /^\/(?:events\/)?api\/schedules(?:\/[^/]+)?$/.test(signedPath(signPath ?? input))) {
+    if (typeof rest.body !== "string") throw new Error("Schedule writes require a serialized JSON body.");
+    signedMetadata = { ...signedMetadata, body_sha256: bytesToHex(sha256(new TextEncoder().encode(rest.body))), nonce: crypto.randomUUID() };
+  }
+  const signed = await signRequest(identity, method, signPath ?? input, signedMetadata);
   const headers = new Headers(initHeaders);
   for (const [k, v] of Object.entries(signed.headers)) headers.set(k, v);
   return fetch(input, { ...rest, method, headers });

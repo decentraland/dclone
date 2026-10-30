@@ -710,6 +710,14 @@ mod tests {
             Some(json!({ "name": "unsigned" })),
         )
         .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (status, _) = call(
+            &app,
+            "POST",
+            "/api/schedules",
+            Some(json!({"domain": {}, "message": {}, "signature": "0x"})),
+        )
+        .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
 
         let mine = sign(
@@ -776,6 +784,55 @@ mod tests {
         assert_eq!(events_actions, 2);
         let (_, feed) = call(&app, "GET", "/federation/v1/events/feed", None).await;
         assert_eq!(feed, json!({ "events": [], "partial": false }));
+    }
+
+    #[tokio::test]
+    async fn changing_the_email_requires_verification_again_but_other_edits_preserve_it() {
+        let Some(pool) = crate::db::scratch::pool(3).await else {
+            return;
+        };
+        let key = PrivateKeySigner::random();
+        let wallet = format!("{:#x}", key.address());
+        sqlx::query("INSERT INTO explore.event_profile_settings (\"user\",email,email_verified) VALUES ($1,'verified@example.org',true)")
+            .bind(&wallet).execute(&pool).await.unwrap();
+        let app = router(Arc::new(ExploreState::new(
+            pool.clone(),
+            Settings {
+                user_writes_enabled: true,
+                ..Settings::for_tests()
+            },
+            None,
+        )));
+        for (email, expected) in [
+            (None, true),
+            (Some("verified@example.org"), true),
+            (Some("new@example.org"), false),
+        ] {
+            let request = sign(
+                &key,
+                catalyst_fed::domains::events(),
+                ProfileSettingsUpdate {
+                    target: wallet.clone(),
+                    email: email.map(str::to_owned),
+                    email_verified: None,
+                    use_local_time: Some(false),
+                    notify_by_email: None,
+                    notify_by_browser: None,
+                    permissions: None,
+                    signed_at: now(),
+                },
+                now(),
+            );
+            let (status, body) = call(
+                &app,
+                "PATCH",
+                "/api/profiles/me/settings",
+                Some(serde_json::to_value(request).unwrap()),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["data"]["email_verified"], expected, "{body}");
+        }
     }
 
     /// A moderator's writes (a schedule, another wallet's settings) are the
