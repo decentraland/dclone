@@ -84,13 +84,19 @@ pub mod fake {
                 .collect())
         }
 
+        /// Records the ask; a fake call has no participant rows, so it is
+        /// never accepted and ends as a pending call.
         async fn end_private_voice_chat(
             &self,
-            call_id: Uuid,
+            call_id: Option<Uuid>,
             address: &str,
-        ) -> Result<(), VoiceUnavailable> {
-            self.note(format!("end-private {call_id} {address}"));
-            Ok(())
+        ) -> Result<
+            Option<crate::comms::gatekeeper::voice::db::PrivateVoiceChatRow>,
+            VoiceUnavailable,
+        > {
+            let call = call_id.map_or_else(|| "latest".to_string(), |id| id.to_string());
+            self.note(format!("end-private {call} {address}"));
+            Ok(None)
         }
 
         async fn community_voice_credentials(

@@ -79,9 +79,9 @@ impl VoiceRooms for Faulty {
 
     async fn end_private_voice_chat(
         &self,
-        call_id: Uuid,
+        call_id: Option<Uuid>,
         address: &str,
-    ) -> Result<(), VoiceUnavailable> {
+    ) -> Result<Option<PrivateVoiceChatRow>, VoiceUnavailable> {
         self.inner.end_private_voice_chat(call_id, address).await
     }
 

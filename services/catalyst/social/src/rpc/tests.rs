@@ -977,12 +977,14 @@ async fn reject_and_disconnect_delete_through_voice_owner_before_signalling() {
             matches!(&*event, SocialEvent::PrivateVoice(u) if u.call_id == dropped.to_string() && u.status == PrivateVoiceChatStatus::VoiceChatEnded as i32)
         );
     }
+    // The runtime is asked about the address's accepted call first; a pending
+    // call has none, so it is deleted as pending.
     assert!(
         voice
             .calls
             .lock()
             .iter()
-            .any(|c| c == &format!("end-private {dropped} {callee}"))
+            .any(|c| c == &format!("end-private latest {callee}"))
     );
 }
 

@@ -207,14 +207,18 @@ impl Db {
         self.voice_due.store(i64::MAX, Ordering::Relaxed);
     }
 
-    /// Milliseconds until the earliest call expires (negative when one already
-    /// has); `None` when the table is empty.
+    /// Milliseconds until the earliest pending call expires (negative when one
+    /// already has); `None` when there is none. An accepted call (it has
+    /// participant rows) never expires, so it does not arm the sweep.
     pub async fn private_voice_next_expiry_ms(
         &self,
         expiration_ms: i64,
     ) -> Result<Option<i64>, DbError> {
         let earliest: Option<NaiveDateTime> =
-            sqlx::query_scalar("SELECT MIN(created_at) FROM social.private_voice_chats")
+            sqlx::query_scalar(
+                "SELECT MIN(created_at) FROM social.private_voice_chats \
+                 WHERE NOT EXISTS (SELECT 1 FROM social.private_voice_chat_participants p WHERE p.call_id = private_voice_chats.id)",
+            )
                 .fetch_one(&self.pool)
                 .await?;
         Ok(earliest.map(|created| {

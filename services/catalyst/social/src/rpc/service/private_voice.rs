@@ -222,14 +222,15 @@ impl SocialServiceImpl {
         })
     }
 
-    /// Deletes the pending call and tells the caller. Any holder of the id rejects;
-    /// upstream refuses all but the callee (an open difference, see RPC.md).
+    /// Deletes the pending call and tells the caller. Only the callee rejects,
+    /// as upstream (`voice.ts:156-157`); anyone else, and an accepted call,
+    /// get the unknown call's not-found and nothing changes.
     pub(crate) async fn reject_private_voice_chat(
         &self,
         request: RejectPrivateVoiceChatPayload,
         context: ProcedureContext<Context>,
     ) -> Result<RejectPrivateVoiceChatResponse, SocialError> {
-        let _me = Self::caller(&context)?;
+        let me = Self::caller(&context)?;
         let Ok(id) = Uuid::parse_str(&request.call_id) else {
             return Ok(RejectPrivateVoiceChatResponse {
                 response: Some(
@@ -242,7 +243,7 @@ impl SocialServiceImpl {
         let ctx = &context.server_context;
         let Some(chat) = ctx
             .voice()
-            .finish_pending_private_call(PendingPrivateCall::Id(id))
+            .finish_pending_private_call(PendingPrivateCall::Rejected { id, callee: me })
             .await?
         else {
             return Ok(RejectPrivateVoiceChatResponse {
@@ -276,7 +277,10 @@ impl SocialServiceImpl {
         })
     }
 
-    /// Deletes the call, asks the runtime to end its room, tells both parties.
+    /// Ends the call and tells both parties. Only a party ends it, as upstream
+    /// (`voice.ts:189-191`); anyone else gets the unknown call's not-found and
+    /// nothing changes. An accepted call ends through the voice runtime, which
+    /// deletes the row and then the room; a pending one has no room.
     pub(crate) async fn end_private_voice_chat(
         &self,
         request: EndPrivateVoiceChatPayload,
@@ -293,22 +297,24 @@ impl SocialServiceImpl {
             });
         };
         let ctx = &context.server_context;
-        let Some(chat) = ctx
-            .voice()
-            .finish_pending_private_call(PendingPrivateCall::Id(id))
-            .await?
-        else {
-            return Ok(EndPrivateVoiceChatResponse {
-                response: Some(end_private_voice_chat_response::Response::NotFound(
-                    NotFoundError {
-                        message: Some("call not found".into()),
-                    },
-                )),
-            });
+        let chat = match ctx.voice().end_private_voice_chat(Some(id), &me).await? {
+            Some(chat) => chat,
+            None => {
+                let pending = PendingPrivateCall::Ended { id, party: me };
+                match ctx.voice().finish_pending_private_call(pending).await? {
+                    Some(chat) => chat,
+                    None => {
+                        return Ok(EndPrivateVoiceChatResponse {
+                            response: Some(end_private_voice_chat_response::Response::NotFound(
+                                NotFoundError {
+                                    message: Some("call not found".into()),
+                                },
+                            )),
+                        });
+                    }
+                }
+            }
         };
-        if let Err(e) = ctx.voice().end_private_voice_chat(id, &me).await {
-            tracing::warn!(error = %e, call_id = %id, "voice runtime: ending the private room");
-        }
         ctx.publish_private_voice(&chat, PrivateVoiceChatStatus::VoiceChatEnded);
         Ok(EndPrivateVoiceChatResponse {
             response: Some(end_private_voice_chat_response::Response::Ok(

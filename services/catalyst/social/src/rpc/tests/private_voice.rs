@@ -238,6 +238,71 @@ async fn an_unknown_call_is_not_found() {
     rig.forget(&[&caller, &callee]).await;
 }
 
+/// Only the callee rejects (upstream `voice.ts:156-157`) and only a party
+/// ends (`voice.ts:189-191`): anyone else holding the id gets the unknown
+/// call's not-found, the call stays and nobody is told. The callee rejects and
+/// either party ends as before.
+#[tokio::test]
+async fn only_the_callee_rejects_and_only_a_party_ends() {
+    let Some(rig) = Rig::new().await else {
+        return;
+    };
+    let _turn = VOICE_TABLE.lock().await;
+    let (caller, callee, stranger) = (addr("pvp1"), addr("pvp2"), addr("pvp3"));
+    let call_id = rig.call(&caller, &callee).await;
+    let (mut to_caller, mut to_callee) = (
+        rig.ctx.pubsub().subscribe(&caller),
+        rig.ctx.pubsub().subscribe(&callee),
+    );
+    let refused_rejects = [
+        rig.reject(&stranger, &call_id).await,
+        rig.reject(&caller, &call_id).await,
+    ];
+    let refused_end = rig.end(&stranger, &call_id).await;
+    let left = rig.calls_between(&caller, &callee).await;
+    let heard = voice_updates(&mut to_caller).len() + voice_updates(&mut to_callee).len();
+    let rejected = rig.reject(&callee, &call_id).await;
+    let mut ended = Vec::new();
+    for party in [&caller, &callee] {
+        let id = rig.call(&caller, &callee).await;
+        ended.push(rig.end(party, &id).await);
+    }
+    let after = rig.calls_between(&caller, &callee).await;
+    rig.forget(&[&caller, &callee, &stranger]).await;
+    for refused in &refused_rejects {
+        assert!(
+            matches!(
+                refused,
+                reject_private_voice_chat_response::Response::NotFound(_)
+            ),
+            "{refused:?}"
+        );
+    }
+    assert!(
+        matches!(
+            refused_end,
+            end_private_voice_chat_response::Response::NotFound(_)
+        ),
+        "{refused_end:?}"
+    );
+    assert_eq!(left, 1, "a refused reject or end deleted the call");
+    assert_eq!(heard, 0, "a refused reject or end told a party");
+    assert!(
+        matches!(
+            rejected,
+            reject_private_voice_chat_response::Response::Ok(_)
+        ),
+        "{rejected:?}"
+    );
+    for answer in &ended {
+        assert!(
+            matches!(answer, end_private_voice_chat_response::Response::Ok(_)),
+            "{answer:?}"
+        );
+    }
+    assert_eq!(after, 0);
+}
+
 /// Each party receives its own grant: the callee in the response, the caller
 /// in ACCEPTED; the incoming request names the caller until it is answered.
 #[tokio::test]

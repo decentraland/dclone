@@ -148,9 +148,9 @@ CREATE INDEX friend_messages_pair_idx
 
 -- ── private voice calls ────────────────────────────────────────────────────
 
--- The call; its LiveKit room is 'voice-chat-private-' || id. Live while
--- created_at >= $now - PRIVATE_VOICE_CHAT_EXPIRATION_TIME (bind parameter);
--- the sweep deletes expired calls in bounded created_at order.
+-- The call; its LiveKit room is 'voice-chat-private-' || id. A pending call (no
+-- participant rows) lives while created_at >= $now - PRIVATE_VOICE_CHAT_EXPIRATION_TIME;
+-- the sweep deletes expired pending calls. An accepted call lives until ended.
 CREATE TABLE social.private_voice_chats (
     id uuid NOT NULL,
     caller_address text NOT NULL,
