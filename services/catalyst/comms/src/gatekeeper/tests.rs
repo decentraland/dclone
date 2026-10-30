@@ -1906,7 +1906,7 @@ async fn a_private_call_is_exclusive_per_wallet_and_follows_the_webhook_lifecycl
     assert!(matches!(
         state
             .voice_db
-            .delete_private_call_if_member(second, &a)
+            .delete_private_call_if_member(Some(second), &a)
             .await,
         Err(super::voice::db::DeleteRoomError::RoomDoesNotExist)
     ));
@@ -1918,7 +1918,8 @@ async fn a_private_call_is_exclusive_per_wallet_and_follows_the_webhook_lifecycl
         .unwrap();
     let mut ended = voice::end_private_voice_chat_by(&state, &third.to_string(), &b)
         .await
-        .unwrap();
+        .unwrap()
+        .users;
     ended.sort();
     let mut expected = vec![a.as_str().to_string(), b.as_str().to_string()];
     expected.sort();

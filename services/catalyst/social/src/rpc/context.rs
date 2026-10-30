@@ -444,32 +444,30 @@ impl Context {
     /// user's call, so the other party keeps ringing until the TTL elapses.
     /// The ENDED notification is symmetric, so the still-online party is told
     /// regardless of which side dropped.
+    /// An accepted call ends through the voice runtime (row, then room);
+    /// otherwise the address's latest pending call is deleted.
     pub async fn end_private_voice_chat_on_disconnect(&self, address: &str) {
-        let chat = match self
-            .0
-            .voice
-            .finish_pending_private_call(
-                crate::comms::gatekeeper::voice::db::PendingPrivateCall::Address(
-                    address.to_string(),
-                ),
-            )
+        let voice = &self.0.voice;
+        let ended = match voice
+            .end_private_voice_chat(None, &address.to_lowercase())
             .await
         {
+            Ok(None) => {
+                let pending = crate::comms::gatekeeper::voice::db::PendingPrivateCall::Address(
+                    address.to_string(),
+                );
+                voice.finish_pending_private_call(pending).await
+            }
+            accepted => accepted,
+        };
+        let chat = match ended {
             Ok(Some(c)) => c,
             Ok(None) => return,
             Err(e) => {
-                tracing::warn!(error = %e, %address, "disconnect voice-cleanup delete failed");
+                tracing::warn!(error = %e, %address, "disconnect voice-cleanup failed");
                 return;
             }
         };
-        if let Err(e) = self
-            .0
-            .voice
-            .end_private_voice_chat(chat.id, &address.to_lowercase())
-            .await
-        {
-            tracing::warn!(error = %e, call_id = %chat.id, "voice runtime: ending the private room on disconnect");
-        }
         self.publish_private_voice(&chat, PrivateVoiceChatStatus::VoiceChatEnded);
     }
 

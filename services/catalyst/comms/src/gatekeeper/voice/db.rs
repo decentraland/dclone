@@ -111,6 +111,13 @@ pub enum PrivateJoin {
     Joined { old_call: Uuid },
 }
 
+/// An accepted call that was ended: its row, and who was in it.
+#[derive(Debug, Clone)]
+pub struct EndedPrivateCall {
+    pub call: PrivateVoiceChatRow,
+    pub users: Vec<String>,
+}
+
 #[derive(Debug)]
 pub enum DeleteRoomError {
     RoomDoesNotExist,
@@ -154,11 +161,24 @@ pub struct StartOutcome {
     pub expired: Vec<PrivateVoiceChatRow>,
 }
 
-/// Call-id deletion, or the latest call for a disconnecting address.
+/// A pending call to delete: one nobody accepted, so it has no participant
+/// rows. An accepted call ends through `end_private_call` instead, which
+/// deletes its room.
 #[derive(Debug, Clone)]
 pub enum PendingPrivateCall {
     Id(Uuid),
+    /// The latest pending call of a disconnecting address.
     Address(String),
+    /// Rejected: only by its callee (upstream `voice.ts:156-157`).
+    Rejected {
+        id: Uuid,
+        callee: String,
+    },
+    /// Ended: only by one of its parties (upstream `voice.ts:189-191`).
+    Ended {
+        id: Uuid,
+        party: String,
+    },
 }
 
 /// Locks the source rows until required media cleanup has succeeded. Dropping
@@ -234,9 +254,12 @@ impl VoiceDb {
             .bind(&participants)
             .execute(&mut *tx)
             .await?;
+        // An accepted call (it has participant rows) never expires, and it
+        // keeps both parties busy whatever its age.
         let expired: Vec<PrivateVoiceChatRow> = sqlx::query(
             "DELETE FROM social.private_voice_chats \
              WHERE created_at < $2 AND (caller_address = ANY($1) OR callee_address = ANY($1)) \
+               AND NOT EXISTS (SELECT 1 FROM social.private_voice_chat_participants p WHERE p.call_id = private_voice_chats.id) \
              RETURNING id, caller_address, callee_address",
         )
         .bind(&participants)
@@ -251,7 +274,10 @@ impl VoiceDb {
              SELECT $1::uuid, $2::text, $3::text \
              WHERE NOT EXISTS ( \
                SELECT 1 FROM social.private_voice_chats \
-               WHERE created_at >= $5 AND (caller_address = ANY($4) OR callee_address = ANY($4)) \
+               WHERE (caller_address = ANY($4) OR callee_address = ANY($4)) \
+                 AND (created_at >= $5 OR EXISTS ( \
+                   SELECT 1 FROM social.private_voice_chat_participants p WHERE p.call_id = private_voice_chats.id \
+                 )) \
              ) \
              RETURNING id",
         )
@@ -269,7 +295,8 @@ impl VoiceDb {
         })
     }
 
-    /// One bounded batch of expired calls, oldest first, deleted and returned.
+    /// One bounded batch of expired pending calls, oldest first, deleted and
+    /// returned. An accepted call (it has participant rows) never expires.
     pub async fn expire_pending_private_calls(
         &self,
         expiration_ms: i64,
@@ -278,6 +305,7 @@ impl VoiceDb {
         let rows = sqlx::query(
             "DELETE FROM social.private_voice_chats WHERE id IN ( \
                SELECT id FROM social.private_voice_chats WHERE created_at < $1 \
+                 AND NOT EXISTS (SELECT 1 FROM social.private_voice_chat_participants p WHERE p.call_id = private_voice_chats.id) \
                ORDER BY created_at ASC LIMIT $2 \
              ) RETURNING id, caller_address, callee_address",
         )
@@ -288,19 +316,35 @@ impl VoiceDb {
         Ok(rows.iter().map(voice_row).collect())
     }
 
-    /// Commit deletion and return the facts social needs for signalling.
+    /// Deletes the pending call and returns the facts social needs for
+    /// signalling; `None` when there is no such pending call (an accepted one
+    /// is never touched here).
     pub async fn finish_pending_private_call(
         &self,
         call: PendingPrivateCall,
     ) -> Result<Option<PrivateVoiceChatRow>, sqlx::Error> {
         let row = match call {
             PendingPrivateCall::Id(id) => sqlx::query(
-                "DELETE FROM social.private_voice_chats WHERE id = $1 RETURNING id, caller_address, callee_address",
+                "DELETE FROM social.private_voice_chats WHERE id = $1 \
+                   AND NOT EXISTS (SELECT 1 FROM social.private_voice_chat_participants p WHERE p.call_id = private_voice_chats.id) \
+                 RETURNING id, caller_address, callee_address",
             ).bind(id).fetch_optional(&self.pool).await?,
+            PendingPrivateCall::Rejected { id, callee } => sqlx::query(
+                "DELETE FROM social.private_voice_chats WHERE id = $1 AND callee_address = $2 \
+                   AND NOT EXISTS (SELECT 1 FROM social.private_voice_chat_participants p WHERE p.call_id = private_voice_chats.id) \
+                 RETURNING id, caller_address, callee_address",
+            ).bind(id).bind(callee.to_lowercase()).fetch_optional(&self.pool).await?,
+            PendingPrivateCall::Ended { id, party } => sqlx::query(
+                "DELETE FROM social.private_voice_chats WHERE id = $1 AND (caller_address = $2 OR callee_address = $2) \
+                   AND NOT EXISTS (SELECT 1 FROM social.private_voice_chat_participants p WHERE p.call_id = private_voice_chats.id) \
+                 RETURNING id, caller_address, callee_address",
+            ).bind(id).bind(party.to_lowercase()).fetch_optional(&self.pool).await?,
             PendingPrivateCall::Address(address) => sqlx::query(
                 "DELETE FROM social.private_voice_chats WHERE id = ( \
                    SELECT id FROM social.private_voice_chats \
-                   WHERE caller_address = $1 OR callee_address = $1 ORDER BY created_at DESC LIMIT 1 \
+                   WHERE (caller_address = $1 OR callee_address = $1) \
+                     AND NOT EXISTS (SELECT 1 FROM social.private_voice_chat_participants p WHERE p.call_id = private_voice_chats.id) \
+                   ORDER BY created_at DESC LIMIT 1 \
                  ) RETURNING id, caller_address, callee_address",
             ).bind(address.to_lowercase()).fetch_optional(&self.pool).await?,
         };
@@ -506,32 +550,39 @@ impl VoiceDb {
         ))
     }
 
-    /// Ends the call `address` is (or was) part of, returning who was in it;
-    /// the participant rows go with the call (FK cascade).
+    /// Ends the call `address` is (or was) part of, `call_id` or else its
+    /// latest, returning the call and who was in it; the participant rows go
+    /// with the call (FK cascade).
     pub async fn delete_private_call_if_member(
         &self,
-        call_id: Uuid,
+        call_id: Option<Uuid>,
         address: &Address,
-    ) -> Result<Vec<String>, DeleteRoomError> {
-        let rows: Vec<(String,)> = sqlx::query_as(
-            "WITH members AS ( \
-                SELECT address FROM social.private_voice_chat_participants WHERE call_id = $1 \
+    ) -> Result<EndedPrivateCall, DeleteRoomError> {
+        let rows = sqlx::query(
+            "WITH target AS ( \
+                SELECT call_id FROM social.private_voice_chat_participants \
+                WHERE address = $2 AND ($1::uuid IS NULL OR call_id = $1) \
+                ORDER BY joined_at DESC LIMIT 1 \
+             ), members AS ( \
+                SELECT p.address FROM social.private_voice_chat_participants p JOIN target t ON p.call_id = t.call_id \
              ), del AS ( \
-                DELETE FROM social.private_voice_chats \
-                WHERE id = $1 AND EXISTS (SELECT 1 FROM members WHERE address = $2) RETURNING id \
+                DELETE FROM social.private_voice_chats WHERE id = (SELECT call_id FROM target) \
+                RETURNING id, caller_address, callee_address \
              ) \
-             SELECT m.address FROM members m WHERE EXISTS (SELECT 1 FROM del)",
+             SELECT d.id, d.caller_address, d.callee_address, m.address FROM del d CROSS JOIN members m",
         )
         .bind(call_id)
         .bind(address)
         .fetch_all(&self.pool)
         .await
         .map_err(DeleteRoomError::Db)?;
-        let addresses: Vec<String> = rows.into_iter().map(|(a,)| a).collect();
-        if addresses.is_empty() {
+        let Some(first) = rows.first() else {
             return Err(DeleteRoomError::RoomDoesNotExist);
-        }
-        Ok(addresses)
+        };
+        Ok(EndedPrivateCall {
+            call: voice_row(first),
+            users: rows.iter().map(|r| r.get::<String, _>("address")).collect(),
+        })
     }
 
     pub async fn delete_private_call(&self, call_id: Uuid) -> Result<(), sqlx::Error> {

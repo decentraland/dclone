@@ -110,8 +110,8 @@ Test files, relative to `services/catalyst/social/src/rpc/` unless a crate is na
 - `tests.rs` (T);
 - `tests/socket.rs` (S), `tests/friends.rs` (F), `tests/settings.rs` (ST), `tests/private_voice.rs` (PV),
   `tests/community_voice.rs` (CV), `tests/failures.rs` (FA), `tests/voice_runtime.rs` (VR),
-  `tests/connectivity.rs` (CN), `tests/upstream_reads.rs` (UR) and `tests/voice_bugs.rs` (VB, ignored: two
-  defects reproduced, failing until fixed);
+  `tests/connectivity.rs` (CN), `tests/upstream_reads.rs` (UR) and `tests/voice_bugs.rs` (VB, the accepted call
+  through the real voice runtime);
 - `service/domain.rs`, `service/helpers.rs`, `service/subscriptions.rs`, `limits.rs`, `profiles.rs`, `pubsub.rs`,
   `context.rs` (their `tests` modules);
 - `shared/src/rpc/handshake.rs` (HS);
@@ -120,14 +120,17 @@ Test files, relative to `services/catalyst/social/src/rpc/` unless a crate is na
 The database tests skip without `CATALYST_TEST_DATABASE_URL`.
 
 Differences that apply throughout:
-- **Error messages.** An `internalServerError` carries `"internal error"` (local `social/src/rpc/service/helpers.rs:139-144`)
+- **Error messages.** An `internalServerError` carries `"internal error"` (local `social/src/rpc/service/helpers.rs:149-154`)
   where upstream carries the error's message (upstream `src/controllers/handlers/rpc/upsert-friendship.ts:69-71`).
   The pending and sent request lists send an empty one on both sides (upstream
   `src/controllers/handlers/rpc/get-pending-friendship-requests.ts:45-46`; local `social/src/rpc/service/domain.rs:245`).
-  A database error raised with `?` in the voice procedures (for example local
-  `social/src/rpc/service/private_voice.rs:49`) is a dcl-rpc remote error, code 500, whose message is
-  `internal server error: <database error>` (local `social/src/rpc/service/helpers.rs:22-23`, `:33-42`), so that
-  detail reaches the client; upstream answers the oneof's `internalServerError` there.
+  A database or voice-runtime error raised with `?` (the private and community voice procedures, for example local
+  `social/src/rpc/service/private_voice.rs:49`) is a dcl-rpc remote error, code 500, whose message is exactly
+  `Internal Server Error` for every procedure; the detail is logged, never sent (local
+  `social/src/rpc/service/helpers.rs:33`, `:44-52`; FA `an_internal_refusal_carries_no_database_text`). Upstream
+  answers the oneof's `internalServerError` there with the error's message (upstream
+  `src/controllers/handlers/rpc/end-private-voice-chat.ts:42-46`): the carrier differs, an open difference, since
+  moving to the oneof would change the wire.
 - **Profiles.** No procedure answers `profileNotFound` on either side at this revision. Upstream drops a listed
   request whose counterparty has no parseable profile (upstream `src/logic/friends/friendships.ts:254-258`) and
   answers an upsert `internalServerError` "Profile not found for address …" after the write and the update
@@ -137,7 +140,7 @@ Differences that apply throughout:
 - **Stream closed.** Upstream ends a second subscription of one event on one connection with a duplicate-subscription
   notice (upstream `src/logic/updates.ts:463`, `:476-477`). The generated proto has no `stream_closed` field (local
   `social/src/rpc/proto/generated/decentraland.social_service.v2.rs:188`) and a second subscription opens another
-  stream (local `social/src/rpc/service/helpers.rs:191-218`).
+  stream (local `social/src/rpc/service/helpers.rs:201-228`).
 
 Production capture: the eight read procedures against `wss://rpc-social-service-ea.decentraland.org`
 (2026-10-28 09:53 UTC, `social-rpc/_socket/reads.json`, 10 calls of a wallet created for the run, the status reads
@@ -191,7 +194,7 @@ on the zero address and a second address created for the run). The local answers
 | Each emitted update names who acted | `parseEmittedUpdateToFriendshipUpdate` (7) | T `two_explorers_exchange_a_friend_request_over_the_socket`; F `cancel_reject_and_delete_reach_the_other_party`, `blocking_a_friend_ends_the_friendship_and_tells_them` | covered, ported |
 | Connectivity updates parse ONLINE and OFFLINE | `parseEmittedUpdateToFriendConnectivityUpdate` | `subscriptions.rs` `replay_tests` | covered |
 | A target is lowercased | `parseUpsertFriendshipRequest` | T `two_explorers_exchange_a_friend_request_over_the_socket` | covered |
-| A request without a message stores none | `parseUpsertFriendshipRequest` | — | differs for an explicit `""` only: upstream stores no message, Catalyst stores and forwards `""` (an absent message is absent on both sides). Upstream `src/logic/friends/friendships.ts:128`; local `social/src/rpc/db.rs:554` |
+| A request without a message stores none | `parseUpsertFriendshipRequest` | — | differs for an explicit `""` only: upstream stores no message, Catalyst stores and forwards `""` (an absent message is absent on both sides). Upstream `src/logic/friends/friendships.ts:128`; local `social/src/rpc/db.rs:558` |
 | Profile mapping; the address is lowercased | `parseProfileToFriend`, `parseProfilesToFriends` | `profiles.rs` `profiles_come_from_the_active_profile_entity` | covered; differs: the picture is the node's face URL, and the caller's casing is kept. Upstream `src/logic/profiles.ts:35`, `:45-49`; local `social/src/rpc/profiles.rs:257`, `:159` |
 | Requests whose counterparty has no (parseable) profile are dropped | 5 cases | `profiles.rs` `without_a_pool_every_address_is_a_placeholder_in_input_order` | differs: a placeholder profile. Upstream `src/logic/friends/friendships.ts:254-266`; local `social/src/rpc/service/domain.rs:257-260`, `social/src/rpc/profiles.rs:263-269` |
 
@@ -260,7 +263,7 @@ on the zero address and a second address created for the run). The local answers
 | get-social-settings (3) | Stored values; the defaults of an absent row, nothing inserted | ST `settings_read_their_defaults_and_round_trip_every_value`; UR | ported |
 | get-private-messages-settings (5) | Privacy and friendship per address, in order; an empty list; more than 50 addresses | ST `private_message_settings_read_per_address_with_friendship`; UR | ported |
 | upsert-social-settings (15) | One or several fields, the merged row back | ST `settings_read_their_defaults_and_round_trip_every_value` | ported |
-| upsert-social-settings | An empty payload answers `invalidRequest` "At least one setting to update must be provided" | — | differs: no check; for a wallet without a row it creates one with the column default `only_friends`. Upstream `src/controllers/handlers/rpc/upsert-social-settings.ts:30-41`; local `social/src/rpc/service/settings.rs:37-72`, `social/src/rpc/db.rs:755`, `:33` |
+| upsert-social-settings | An empty payload answers `invalidRequest` "At least one setting to update must be provided" | — | differs: no check; for a wallet without a row it creates one with the column default `only_friends`. Upstream `src/controllers/handlers/rpc/upsert-social-settings.ts:30-41`; local `social/src/rpc/service/settings.rs:37-72`, `social/src/rpc/db.rs:759`, `:33` |
 | upsert-social-settings | An unknown privacy value answers `invalidRequest` | — | differs (as settings.utils). Upstream `src/controllers/handlers/rpc/upsert-social-settings.ts:83-91`; local `social/src/rpc/service/settings.rs:43-45` |
 | upsert-social-settings | The gatekeeper's copy follows the privacy, fail-closed (10 cases) | — | n/a: one table; the private-messages token reads it when minted |
 
@@ -273,27 +276,27 @@ on the zero address and a second address created for the run). The local answers
 | voice-logic | Calling yourself is refused before any read, in any letter case | T `self_call_is_forbidden_before_any_read`; PV `a_start_follows_the_callers_privacy_and_refuses_yourself` | covered, ported |
 | voice-logic | A blocked pair is refused and writes no call | T `blocked_pair_cannot_start_call_and_friends_can`; PV `a_start_follows_the_callers_privacy_and_refuses_yourself` | covered, ported |
 | voice-logic | The callee's and the caller's `only_friends` refuse a stranger, admit a friend | T `blocked_pair_cannot_start_call_and_friends_can`; PV `a_start_follows_the_callers_privacy_and_refuses_yourself` | covered, ported |
-| voice-logic | Either party busy is a conflict | T `blocked_pair_cannot_start_call_and_friends_can`, `live_call_still_blocks_symmetrically`, `expired_prior_call_does_not_block_new_one` | covered |
+| voice-logic | Either party busy is a conflict | T `blocked_pair_cannot_start_call_and_friends_can`, `live_call_still_blocks_symmetrically`, `expired_prior_call_does_not_block_new_one`; VB `an_old_accepted_call_keeps_its_parties_busy` | covered |
 | voice-logic, start-private-voice-chat | Either party in a voice chat (private or community) is a conflict naming it | PV `either_party_already_in_a_voice_room_is_a_conflict_naming_it` | ported; differs: the community check comes after the self-call and the block, not before. Upstream `src/controllers/handlers/rpc/start-private-voice-chat.ts:32-48` before `src/logic/voice/voice.ts:36-45`; local `social/src/rpc/service/private_voice.rs:37`, `:50`, `:55` |
 | voice-logic | The callee is rung with the call id | T `blocked_pair_cannot_start_call_and_friends_can` | covered |
 | voice-logic | A competing reservation is a conflict without ringing | comms `voice::db` `pending_calls_serialize_shared_participants_and_return_deleted_rows`; VR `a_lost_reservation_is_busy_and_rings_no_one` | covered, ported |
 | voice-logic | Accept: an unknown call is not found; only the callee accepts; each party gets its own grant | PV `an_unknown_call_is_not_found`, `each_party_gets_its_own_grant_and_the_callee_sees_the_incoming_call`; T `blocked_pair_cannot_start_call_and_friends_can` | covered, ported |
 | voice-logic | Accept: a credentials failure is an error with no ACCEPTED | VR `a_failed_private_grant_is_an_internal_error_without_accepted` | ported |
-| voice-logic | Accept deletes the pending call | VB `an_accepted_call_is_never_swept_as_expired` (ignored, fails) | differs: the call is kept with a fresh `created_at` and the incoming request still returns it; the expiry sweep then ends the accepted call as EXPIRED (a defect). Upstream `src/logic/voice/voice.ts:120-121`; local `social/src/rpc/service/private_voice.rs:171-174`, `comms/src/gatekeeper/voice/db.rs:337`, `:279-281`, `social/src/rpc/db.rs:970-971` |
+| voice-logic | Accept deletes the pending call | VB `an_accepted_call_is_never_swept_as_expired`, `an_old_accepted_call_keeps_its_parties_busy`, `an_old_accepted_call_does_not_arm_the_sweep` | ported; differs: the call row is kept while the call lasts (its participant rows mark it accepted), so the incoming request still returns it; it never expires (the sweep, the start's reclaim and the sweep scheduler skip it) and keeps both parties busy whatever its age. Upstream `src/logic/voice/voice.ts:120-121`; local `comms/src/gatekeeper/voice/db.rs:381`, `:262`, `:278`, `:308`, `social/src/rpc/db.rs:219-220`, `:974-975` |
 | voice-logic | Reject: an unknown call or a second reject is not found; the caller hears REJECTED | PV `an_unknown_call_is_not_found`; T `reject_and_disconnect_delete_through_voice_owner_before_signalling` | covered, ported |
-| voice-logic | Reject by someone other than the callee is not found | — | differs: any holder of the id rejects. Upstream `src/logic/voice/voice.ts:156-157`; local `social/src/rpc/service/private_voice.rs:232`, `:243-246` |
+| voice-logic | Reject by someone other than the callee is not found | PV `only_the_callee_rejects_and_only_a_party_ends` | ported; an accepted call is not found either, as upstream deletes the pending call on accept. Upstream `src/logic/voice/voice.ts:156-157`; local `social/src/rpc/service/private_voice.rs:246`, `comms/src/gatekeeper/voice/db.rs:332-336` |
 | voice-logic | End: an unknown call is not found; the caller ends | PV `an_unknown_call_is_not_found`; T `blocked_pair_cannot_start_call_and_friends_can` | covered, ported |
-| voice-logic | End by a non-party is not found; only the other party hears ENDED | — | differs: the call ends and both parties hear ENDED. Upstream `src/logic/voice/voice.ts:189-191`, `:203-204`; local `social/src/rpc/service/private_voice.rs:296-299`, `:312`, `social/src/rpc/context.rs:493-499` |
-| voice-logic | End deletes the LiveKit room | VB `ending_an_accepted_call_deletes_its_room` (ignored, fails) | differs: the room is never deleted (a defect): the call row is deleted first, so the runtime's end finds none and takes its 404 as success. Upstream `src/logic/voice/voice.ts:217`; local `social/src/rpc/service/private_voice.rs:296-299`, `comms/src/gatekeeper/voice/mod.rs:276-292`, `comms/src/gatekeeper/voice/rooms.rs:339` |
-| voice-logic | End: a runtime failure is an error | — | differs: logged, the answer is ok. Upstream `src/logic/voice/voice.ts:217`, `src/controllers/handlers/rpc/end-private-voice-chat.ts:42-46`; local `social/src/rpc/service/private_voice.rs:309-311` |
+| voice-logic | End by a non-party is not found; only the other party hears ENDED | PV `only_the_callee_rejects_and_only_a_party_ends`; VB `a_stranger_cannot_end_an_accepted_call` | ported; differs: both parties hear ENDED. Upstream `src/logic/voice/voice.ts:189-191`, `:203-204`; local `social/src/rpc/service/private_voice.rs:318`, `social/src/rpc/context.rs:491-497` |
+| voice-logic | End deletes the LiveKit room | VB `ending_an_accepted_call_deletes_its_room`, `a_failed_room_delete_still_removes_the_call` | ported: an accepted call ends through the runtime's end path, which deletes the row while membership is still checkable, then the room. Upstream `src/logic/voice/voice.ts:217`; local `social/src/rpc/service/private_voice.rs:300`, `comms/src/gatekeeper/voice/mod.rs:285-303` |
+| voice-logic | End: a runtime failure is an error | VB `a_failed_room_delete_still_removes_the_call`; FA `an_internal_refusal_carries_no_database_text` | differs: a failed room delete is logged and the answer is ok (the call row is already gone); a database failure is the remote error 500 (throughout). Upstream `src/logic/voice/voice.ts:217`, `src/controllers/handlers/rpc/end-private-voice-chat.ts:42-46`; local `comms/src/gatekeeper/voice/mod.rs:300-302`, `social/src/rpc/service/private_voice.rs:300` |
 | voice-logic | Incoming: none is not found; a pending call names its caller | PV `each_party_gets_its_own_grant_and_the_callee_sees_the_incoming_call` | ported |
-| voice-logic | Disconnect: the other party hears ENDED; no call does nothing | T `reject_and_disconnect_delete_through_voice_owner_before_signalling`; PV `a_caller_that_disconnects_ends_the_call_for_the_callee`; VB `ending_an_accepted_call_deletes_its_room` (the room, ignored) | covered, ported; differs: the party that dropped hears ENDED too, and the room is not deleted (as End). Upstream `src/logic/voice/voice.ts:263-269`; local `social/src/rpc/context.rs:446-475`, `:493-499` |
+| voice-logic | Disconnect: the other party hears ENDED; no call does nothing | T `reject_and_disconnect_delete_through_voice_owner_before_signalling`; PV `a_caller_that_disconnects_ends_the_call_for_the_callee`; VB `ending_an_accepted_call_deletes_its_room` (the room) | covered, ported; differs: the party that dropped hears ENDED too. Upstream `src/logic/voice/voice.ts:263-269`; local `social/src/rpc/context.rs:446-473`, `:491-497` |
 | voice-logic | Expiry pages through batches and tells both parties | T `sweep_reclaims_the_same_rows_the_busy_check_skips`, `sweep_tick_issues_no_delete_until_a_call_is_due`; PV `the_expiry_sweep_pages_through_and_tells_both_parties` | covered, ported |
 | voice-logic | Gatekeeper fallbacks and delete races | 7 cases | n/a: one table, atomic deletes |
 | start-private-voice-chat (7) | Ok, refused, busy, in a voice chat, unknown error; the messages | T `blocked_pair_cannot_start_call_and_friends_can`, `a_missing_voice_runtime_refuses_the_call_explicitly`; PV `a_refused_start_says_why`, `either_party_already_in_a_voice_room_is_a_conflict_naming_it`; VR `a_lost_reservation_is_busy_and_rings_no_one` | covered, ported; differs: a self-call and a blocked pair get their own messages, not the not-friends one. Upstream `src/logic/voice/voice.ts:36-45`, `src/logic/voice/errors.ts:1-5`; local `social/src/rpc/service/private_voice.rs:37-53` |
-| accept-, reject-, end-private-voice-chat (10) | Ok with the call id; not found; refused | PV, T (above) | covered, ported; differs: the not-found messages are "call not found" and "no incoming call", not upstream's sentences naming the id or address. Upstream `src/logic/voice/errors.ts:19-29`; local `social/src/rpc/service/private_voice.rs:156`, `:349` |
+| accept-, reject-, end-private-voice-chat (10) | Ok with the call id; not found; refused | PV, T (above) | covered, ported; differs: the not-found messages are "call not found" and "no incoming call", not upstream's sentences naming the id or address. Upstream `src/logic/voice/errors.ts:19-29`; local `social/src/rpc/service/private_voice.rs:156`, `:355` |
 | get-incoming-private-voice-chat-requests (3) | Ok, not found, internal | PV `each_party_gets_its_own_grant_and_the_callee_sees_the_incoming_call`; FA | ported |
-| subscribe-to-private-voice-chat-updates (8) | Who receives each status | T `blocked_pair_cannot_start_call_and_friends_can`, `reject_and_disconnect_delete_through_voice_owner_before_signalling`; PV | covered, ported; differs: every update carries caller and callee, where upstream sets only the caller of REQUESTED. Upstream `src/controllers/handlers/rpc/subscribe-to-private-voice-chat-updates.ts:36-41`; local `social/src/rpc/context.rs:485-490`; stream closed differs (throughout) |
+| subscribe-to-private-voice-chat-updates (8) | Who receives each status | T `blocked_pair_cannot_start_call_and_friends_can`, `reject_and_disconnect_delete_through_voice_owner_before_signalling`; PV | covered, ported; differs: every update carries caller and callee, where upstream sets only the caller of REQUESTED. Upstream `src/controllers/handlers/rpc/subscribe-to-private-voice-chat-updates.ts:36-41`; local `social/src/rpc/context.rs:483-488`; stream closed differs (throughout) |
 
 ## Community voice
 
@@ -320,7 +323,7 @@ on the zero address and a second address created for the run). The local answers
 | community-voice | A ban landing during a join refuses it and evicts the seat | — | differs: the ban is read once, before the grant. Upstream `src/logic/community-voice/community-voice.ts:279-290`; local `social/src/rpc/service/community_voice.rs:111-121`, `:125-150` |
 | community-voice | STARTED carries positions, worlds and image, and reaches every subscriber of a public listed community | — | differs: empty lists, no image, members only. Upstream `src/logic/community-voice/community-voice.ts:208`, `src/logic/updates.ts:401-402`; local `social/src/rpc/service/domain.rs:312-327` |
 | community-voice | The profile reaches the room metadata | — | differs: none. Upstream `src/logic/community-voice/community-voice.ts:124`; local `comms/src/gatekeeper/voice/rooms.rs:356` |
-| community-voice-polling (8) | A room ending out of band reaches subscribers as ENDED | comms `gatekeeper::tests::a_community_room_lives_while_a_moderator_is_present_and_sweeps_otherwise` | differs: it writes notifications, not a stream update. Upstream `src/logic/community-voice/community-voice-polling.ts:118-120`; local `comms/src/gatekeeper/voice/mod.rs:1171-1193`, `social/src/comms_directory.rs:39-47` |
+| community-voice-polling (8) | A room ending out of band reaches subscribers as ENDED | comms `gatekeeper::tests::a_community_room_lives_while_a_moderator_is_present_and_sweeps_otherwise` | differs: it writes notifications, not a stream update. Upstream `src/logic/community-voice/community-voice-polling.ts:118-120`; local `comms/src/gatekeeper/voice/mod.rs:1183-1205`, `social/src/comms_directory.rs:39-47` |
 | community-voice-cache (18) | The Redis cache | — | n/a: room state is derived from `social.community_voice_chat_users` |
 | subscribe-to-community-voice-chat-updates (11) | Updates in order with their fields | `service/helpers.rs` `pubsub_routing_tests::one_publish_reaches_only_the_matching_stream_in_order` | covered (routing); stream closed differs (throughout) |
 

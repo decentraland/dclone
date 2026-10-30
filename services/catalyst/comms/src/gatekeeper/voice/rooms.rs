@@ -30,7 +30,7 @@ use super::db::{PendingPrivateCall, PrivateVoiceChatRow, StartOutcome};
 
 use super::{
     CommunityVoiceChatBody, community_voice_credentials_for, destroy_community_voice_chat,
-    end_private_voice_chat_by, get_private_voice_chat_room_credentials, kick_from_community_room,
+    end_private_call, get_private_voice_chat_room_credentials, kick_from_community_room,
     merge_metadata, patch, require_livekit, set_speaker,
 };
 use crate::gatekeeper::CommsState;
@@ -99,12 +99,14 @@ pub trait VoiceRooms: Send + Sync {
         caller: &str,
     ) -> Result<HashMap<String, String>, VoiceUnavailable>;
 
-    /// Tears the private room down on `address`'s behalf.
+    /// Ends the accepted call `call_id` (or else the latest one `address` is
+    /// in) on `address`'s behalf, `address` being one of its participants:
+    /// the row, then the room. `None` when there is no such accepted call.
     async fn end_private_voice_chat(
         &self,
-        call_id: Uuid,
+        call_id: Option<Uuid>,
         address: &str,
-    ) -> Result<(), VoiceUnavailable>;
+    ) -> Result<Option<PrivateVoiceChatRow>, VoiceUnavailable>;
 
     /// A grant for `voice-chat-community-<community_id>`; `role` is the stored
     /// community role text, `Create` opens the room, `Join` enters it.
@@ -191,9 +193,9 @@ impl VoiceRooms for NoVoiceRuntime {
 
     async fn end_private_voice_chat(
         &self,
-        _call_id: Uuid,
+        _call_id: Option<Uuid>,
         _address: &str,
-    ) -> Result<(), VoiceUnavailable> {
+    ) -> Result<Option<PrivateVoiceChatRow>, VoiceUnavailable> {
         Err(VoiceUnavailable::NotConfigured)
     }
 
@@ -329,16 +331,14 @@ impl VoiceRooms for CommsState {
 
     async fn end_private_voice_chat(
         &self,
-        call_id: Uuid,
+        call_id: Option<Uuid>,
         address_raw: &str,
-    ) -> Result<(), VoiceUnavailable> {
+    ) -> Result<Option<PrivateVoiceChatRow>, VoiceUnavailable> {
         let who = address(address_raw)?;
-        match end_private_voice_chat_by(self, &call_id.to_string(), &who).await {
-            Ok(_) => Ok(()),
-            // The RPC deleted the call row before asking; a room already gone is the wanted end state.
-            Err(e) if e.code == 404 => Ok(()),
-            Err(e) => Err(unavailable(e)),
-        }
+        Ok(end_private_call(self, call_id, &who)
+            .await
+            .map_err(unavailable)?
+            .map(|ended| ended.call))
     }
 
     async fn community_voice_credentials(

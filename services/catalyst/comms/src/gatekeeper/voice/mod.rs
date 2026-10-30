@@ -41,7 +41,7 @@ use super::moderation::store::UpsertPlayerConnection;
 use super::{CommsState, SharedState};
 use crate::rooms::private_voice_chat_room_name;
 use crate::shared::signed_fetch::SignedPath;
-use db::{CommunityJoinError, DeleteRoomError, PrivateJoin, VoiceChatUserStatus};
+use db::{CommunityJoinError, DeleteRoomError, EndedPrivateCall, PrivateJoin, VoiceChatUserStatus};
 
 const STALE_LEAVE_SKEW_MS: i64 = 1000;
 
@@ -270,27 +270,37 @@ pub async fn end_private_voice_chat_by(
     state: &CommsState,
     room_id: &str,
     address: &Address,
-) -> Result<Vec<String>, ApiError> {
-    let call_id = Uuid::parse_str(room_id.trim())
-        .map_err(|_| ApiError::not_found(format!("Room {room_id} does not exist")))?;
-    let users_in_room = match state
+) -> Result<EndedPrivateCall, ApiError> {
+    let not_found = || ApiError::not_found(format!("Room {room_id} does not exist"));
+    let call_id = Uuid::parse_str(room_id.trim()).map_err(|_| not_found())?;
+    end_private_call(state, Some(call_id), address)
+        .await?
+        .ok_or_else(not_found)
+}
+
+/// Ends the accepted call `call_id` (or else the latest one `address` is in)
+/// when `address` is one of its participants: the row goes first, then the
+/// LiveKit room. A failed room delete is logged; the row is gone either way.
+/// `None` when `address` is in no such call.
+pub async fn end_private_call(
+    state: &CommsState,
+    call_id: Option<Uuid>,
+    address: &Address,
+) -> Result<Option<EndedPrivateCall>, ApiError> {
+    let ended = match state
         .voice_db
         .delete_private_call_if_member(call_id, address)
         .await
     {
-        Ok(users) => users,
-        Err(DeleteRoomError::RoomDoesNotExist) => {
-            return Err(ApiError::not_found(format!(
-                "Room {room_id} does not exist"
-            )));
-        }
+        Ok(ended) => ended,
+        Err(DeleteRoomError::RoomDoesNotExist) => return Ok(None),
         Err(DeleteRoomError::Db(e)) => return Err(e.into()),
     };
-    let room_name = private_voice_chat_room_name(&call_id);
+    let room_name = private_voice_chat_room_name(&ended.call.id);
     if let Err(e) = state.room_service().delete_room(&room_name).await {
         tracing::warn!(error = %e, room = %room_name, "failed to delete livekit private voice room");
     }
-    Ok(users_in_room)
+    Ok(Some(ended))
 }
 
 /// DELETE /private-voice-chat/{id} (service token).
@@ -306,7 +316,9 @@ pub async fn end_private_voice_chat(
         .ok_or_else(|| ApiError::bad_request("Invalid request body, missing address"))?;
     let address = Address::parse(address)
         .map_err(|_| ApiError::bad_request("Invalid request body, invalid address"))?;
-    let users_in_room = end_private_voice_chat_by(&state, &id, &address).await?;
+    let users_in_room = end_private_voice_chat_by(&state, &id, &address)
+        .await?
+        .users;
     Ok(Json(
         serde_json::json!({ "users_in_voice_chat": users_in_room }),
     ))
