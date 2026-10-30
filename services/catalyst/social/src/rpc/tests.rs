@@ -1328,13 +1328,17 @@ struct Server {
 }
 
 async fn spawn_server(pool: Option<PgPool>, auth_window_secs: i64) -> Server {
-    spawn_server_with(pool, auth_window_secs, None).await
+    let settings = Settings {
+        auth_window_secs,
+        ..Settings::default()
+    };
+    spawn_server_with(pool, settings, None).await
 }
 
-/// [`spawn_server`] with the EIP-1654 validator the handshake uses.
+/// [`spawn_server`] with its settings and the EIP-1654 validator the handshake uses.
 async fn spawn_server_with(
     pool: Option<PgPool>,
-    auth_window_secs: i64,
+    settings: Settings,
     eip1654: Option<Arc<dyn crate::auth::eip1654::Eip1654Validator>>,
 ) -> Server {
     let pool = pool.unwrap_or_else(|| {
@@ -1346,10 +1350,6 @@ async fn spawn_server_with(
         Db::new(pool.clone()),
         Arc::new(FakeVoiceRooms::new(pool.clone())),
     );
-    let settings = Settings {
-        auth_window_secs,
-        ..Settings::default()
-    };
     let state = Arc::new(State::with_context(settings, ctx, eip1654));
     let jobs = Jobs::new();
     state.start_topology(&jobs, Arc::new(crate::comms::topology::Topology::default()));
@@ -1629,6 +1629,20 @@ async fn subscribed<T>(
     generator
 }
 
+/// A Pulse island frame naming `wallets` as present.
+fn pulse_frame(wallets: Vec<String>) -> Vec<u8> {
+    use crate::comms::protocol::pulse::decentraland::kernel::comms::v3::{
+        IslandData, IslandStatusMessage,
+    };
+    IslandStatusMessage {
+        data: vec![IslandData {
+            peers: wallets,
+            ..Default::default()
+        }],
+    }
+    .encode_to_vec()
+}
+
 /// A second wallet for the two-client run.
 const SECOND_ROOT_KEY: &str = "7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6";
 
@@ -1655,17 +1669,6 @@ async fn two_explorers_exchange_a_friend_request_over_the_socket() {
         !server.state.ctx.is_online(&alice) && !server.state.ctx.is_online(&bob),
         "handshakes do not establish Pulse presence"
     );
-    let pulse_frame = |wallets: Vec<String>| {
-        crate::comms::protocol::pulse::decentraland::kernel::comms::v3::IslandStatusMessage {
-            data: vec![
-                crate::comms::protocol::pulse::decentraland::kernel::comms::v3::IslandData {
-                    peers: wallets,
-                    ..Default::default()
-                },
-            ],
-        }
-        .encode_to_vec()
-    };
     server
         .state
         .ctx

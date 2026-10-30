@@ -222,7 +222,9 @@ fn voice_updates(
 }
 
 /// A moderator starts like the owner; the owner or a moderator ends and the
-/// members hear ENDED; a member can do neither. Recorded difference: the
+/// members hear ENDED; a member can do neither. As upstream's `updates.spec.ts`
+/// (`src/logic/updates.ts:335-337`, `:396`), the starter is not told of its own
+/// STARTED and a wallet with no role hears neither. Recorded difference: the
 /// second end answers ok with no room left to end, and neither start nor end
 /// reads whether a room is live (RPC.md, community voice, "start-, end-, join-, raise a hand, self-unmute": upstream answers not found without a live room (`src/logic/community-voice/validation.ts:41-42`, `community-voice.ts:309-312`); Catalyst has no room-live check.)
 #[tokio::test]
@@ -231,7 +233,10 @@ async fn moderators_start_and_end_and_members_cannot() {
         return;
     };
     let mut to_member = rig.ctx.pubsub().subscribe(&rig.member);
+    let mut to_starter = rig.ctx.pubsub().subscribe(&rig.moderator);
+    let mut to_guest = rig.ctx.pubsub().subscribe(&rig.guest);
     assert_eq!(rig.start(&rig.moderator).await, "Ok");
+    assert!(voice_updates(&mut to_starter).is_empty());
     let started = voice_updates(&mut to_member);
     assert!(
         started.iter().any(|u| u.community_id == rig.cid
@@ -251,6 +256,7 @@ async fn moderators_start_and_end_and_members_cannot() {
         );
         assert!(rig.runtime_saw(&format!("end-community {} {ender}", rig.community)));
     }
+    assert!(voice_updates(&mut to_guest).is_empty());
     rig.drop().await;
 }
 

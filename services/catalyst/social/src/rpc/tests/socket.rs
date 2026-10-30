@@ -140,7 +140,11 @@ async fn an_unreachable_contract_validator_closes_unauthorized() {
             ))
         }
     }
-    let server = spawn_server_with(None, 5, Some(Arc::new(Unreachable))).await;
+    let settings = Settings {
+        auth_window_secs: 5,
+        ..Settings::default()
+    };
+    let server = spawn_server_with(None, settings, Some(Arc::new(Unreachable))).await;
     let ts = chrono::Utc::now().timestamp_millis().to_string();
     let link = |kind: &str, payload: &str, signature: &str| {
         serde_json::json!({ "type": kind, "payload": payload, "signature": signature }).to_string()
@@ -238,5 +242,79 @@ async fn closing_an_authenticated_socket_releases_its_connection() {
         crate::shared::test_wait::until(async || server.state.ctx.live_connections() == 0).await,
         "the closed socket still counts"
     );
+    server.jobs.shutdown(Duration::from_secs(2)).await;
+}
+
+/// Opens a socket and authenticates it as a wallet made for the call.
+async fn authenticated(server: &Server) -> WsStream {
+    let mut socket = connect(server, "/social-rpc").await;
+    let ts = chrono::Utc::now().timestamp_millis();
+    let payload = crate::shared::signed_fetch::build_payload_v6("get", "/", &ts.to_string(), "{}");
+    let (_, frame) = frame_signed(
+        &PrivateKeySigner::random(),
+        &PrivateKeySigner::random(),
+        ts,
+        &payload,
+        "{}",
+    )
+    .await;
+    socket.send(WsMessage::Text(frame.into())).await.unwrap();
+    assert!(is_server_ready(&next_message(&mut socket).await));
+    socket
+}
+
+/// Upstream's `ws-pool-component.spec.ts` "registering multiple connections":
+/// each socket counts, and closing one frees only its own slot.
+#[tokio::test]
+async fn each_socket_counts_and_closing_one_frees_its_slot() {
+    let server = spawn_server(None, 5).await;
+    let mut first = authenticated(&server).await;
+    let _second = authenticated(&server).await;
+    assert!(
+        crate::shared::test_wait::until(async || server.state.ctx.live_connections() == 2).await,
+        "two sockets, two slots"
+    );
+    first.close(None).await.unwrap();
+    assert!(
+        crate::shared::test_wait::until(async || server.state.ctx.live_connections() == 1).await,
+        "closing one frees one"
+    );
+    server.jobs.shutdown(Duration::from_secs(2)).await;
+}
+
+/// Upstream's pool cap (`src/logic/ws-pool/component.ts:26-29`,
+/// `src/controllers/handlers/uws/ws-handler.ts:407`): with the pool full a new
+/// socket closes 1013, and a freed slot is taken again. Recorded difference
+/// (RPC.md, ws-pool-component.spec.ts, "A full pool refuses a new socket"):
+/// the reason reads "Server is at capacity; try again later", not "Unable to
+/// acquire connection", and only authenticated sockets count.
+#[tokio::test]
+async fn a_full_pool_closes_a_new_socket_until_a_slot_frees() {
+    let settings = Settings {
+        auth_window_secs: 5,
+        ws_max_concurrent_connections: Some(1),
+        ..Settings::default()
+    };
+    let server = spawn_server_with(None, settings, None).await;
+    let mut first = authenticated(&server).await;
+    assert!(
+        crate::shared::test_wait::until(async || server.state.ctx.live_connections() == 1).await
+    );
+    let mut refused = connect(&server, "/social-rpc").await;
+    match next_message(&mut refused).await {
+        WsMessage::Close(Some(frame)) => {
+            assert_eq!(u16::from(frame.code), 1013);
+            assert_eq!(
+                frame.reason.as_str(),
+                "Server is at capacity; try again later"
+            );
+        }
+        other => panic!("expected a close, got {other:?}"),
+    }
+    first.close(None).await.unwrap();
+    assert!(
+        crate::shared::test_wait::until(async || server.state.ctx.live_connections() == 0).await
+    );
+    let _again = authenticated(&server).await;
     server.jobs.shutdown(Duration::from_secs(2)).await;
 }
