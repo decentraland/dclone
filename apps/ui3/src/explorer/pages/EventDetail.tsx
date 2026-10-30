@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { CSSProperties } from "react";
+import ChromeLink from "../../web/frames/ChromeLink";
 import "./eventdetail.css";
 
 type EventData = {
@@ -121,6 +122,7 @@ type EventDetailProps = {
   interestedError?: string | null;
   interestedPending?: boolean;
   onToggleInterested?: () => void;
+  rsvpHref?: string;
 };
 
 export default function EventDetail({
@@ -133,6 +135,7 @@ export default function EventDetail({
   interestedError,
   interestedPending = false,
   onToggleInterested,
+  rsvpHref,
 }: EventDetailProps = {}) {
   const e = event || EVENT;
   const evForActions: EventData = { ...e, url: e.url || jumpHref };
@@ -190,25 +193,24 @@ export default function EventDetail({
                   <span className="evd__attcount">{interestedCount}</span>
                 ) : null}
               </button>
-            ) : (
-              <button
-                className="evd__remind"
-                type="button"
-                onClick={() => remindOrCalendar(true)}
-              >
-                <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
-                  <path
-                    d="M8 2a3.4 3.4 0 00-3.4 3.4c0 3.2-1.1 4.3-1.1 4.3h9c0 0-1.1-1.1-1.1-4.3A3.4 3.4 0 008 2zM6.6 11.7a1.4 1.4 0 002.8 0"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="1.3"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                </svg>
-                REMIND ME
-              </button>
-            )}
+            ) : rsvpHref ? <ChromeLink className="evd__remind" href={rsvpHref}>Manage RSVP</ChromeLink> : null}
+            <button
+              className="evd__remind"
+              type="button"
+              onClick={() => remindOrCalendar(true)}
+            >
+              <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
+                <path
+                  d="M8 2a3.4 3.4 0 00-3.4 3.4c0 3.2-1.1 4.3-1.1 4.3h9c0 0-1.1-1.1-1.1-4.3A3.4 3.4 0 008 2zM6.6 11.7a1.4 1.4 0 002.8 0"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.3"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+              REMIND ME
+            </button>
             <button
               className="evd__iconbtn"
               type="button"
@@ -293,10 +295,11 @@ export default function EventDetail({
                 />
               </svg>
               <span>{e.location}</span>
-              {!onJumpIn && jumpHref ? (
+              {jumpHref ? (
                 <a
                   className="evd__jumpin"
                   href={jumpHref}
+                  onClick={onJumpIn}
                   target="_blank"
                   rel="noopener noreferrer"
                   data-sb-linkto="Explorer/Workflows/SceneLoading"

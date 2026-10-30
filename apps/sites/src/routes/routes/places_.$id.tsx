@@ -110,6 +110,9 @@ export default function PlaceDetailRoute({ loaderData }: Route.ComponentProps) {
                 approval: Math.round((place.like_rate ?? 0) * 100),
                 description: place.description ?? "",
                 coords: place.base_position ?? "",
+                categories: place.categories ?? [],
+                world: place.world ?? false,
+                worldName: place.world_name ?? null,
                 parcels: (place.positions ?? []).length,
                 favorites: place.favorites ?? 0,
                 updated: place.updated_at

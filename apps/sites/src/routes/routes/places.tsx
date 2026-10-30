@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import type { ShouldRevalidateFunctionArgs } from "react-router";
-import { Link, useNavigation, useSearchParams } from "react-router";
+import { Link, useNavigate, useNavigation, useSearchParams } from "react-router";
 
-import ExploreChrome from "@ui/explorer/frames/ExploreChrome";
+import ExploreChrome, { EXPLORE_TABS, PUBLIC_WORLD_TABS, type TabId } from "@ui/explorer/frames/ExploreChrome";
 import PlaceCard from "@ui/components/PlaceCard";
 import SearchField from "@ui/atoms/SearchField";
 import FreshnessNotice from "@ui/components/FreshnessNotice";
@@ -30,7 +30,14 @@ export function meta() {
 
 export const handle = { agentMarkdown: "placesIndex" } satisfies AgentMarkdownHandle;
 
-const noop = () => {};
+const PLACES_TABS = EXPLORE_TABS.filter((tab) => PUBLIC_WORLD_TABS.has(tab.id));
+const TAB_ROUTES: Partial<Record<TabId, string>> = {
+  events: "/whats-on",
+  places: "/places",
+  communities: "/social",
+  marketplace: "/shop",
+  create: "/create",
+};
 
 const FALLBACK: PageDefaults = {
   variant: "live-signals",
@@ -169,6 +176,7 @@ function PlacesExplorer({
 }: ExplorerProps) {
   const [, setSearchParams] = useSearchParams();
   const navigation = useNavigation();
+  const navigate = useNavigate();
 
   const key = `${activeCategory}|${search}`;
   const [acc, setAcc] = useState<Accumulated>(() => ({
@@ -207,7 +215,12 @@ function PlacesExplorer({
   }
 
   return (
-    <ExploreChrome active="places" onTab={noop} onClose={noop}>
+    <ExploreChrome
+      active="places"
+      tabs={PLACES_TABS}
+      onTab={(tab) => { const route = TAB_ROUTES[tab]; if (route) navigate(route); }}
+      onClose={() => navigate("/play")}
+    >
       <div className="pl" data-places-layout={layoutV2 ? "v2" : "v1"}>
         <div className="pl__head">
           <h1 className="pl__title">Places</h1>

@@ -1,7 +1,7 @@
 import type { BlogBlock, BlogPost, BlogPostCard } from "@/core/lib/content/blog";
 import type { Place } from "../catalyst/schema";
 import { playUrl } from "../catalyst/bases";
-import { eventCoords, formatEventWhen, type Event } from "../catalyst/places/events";
+import { eventOccurrence, eventCoords, formatEventWhen, type Event } from "../catalyst/places/events";
 import type { ShopPageData } from "../shop/pages";
 import type { ProfileVM } from "../catalyst/social/profile";
 import type { CommunityDetail } from "../catalyst/social/communities";
@@ -281,7 +281,7 @@ type AgentWhatsOnData = {
 
 function eventLine(e: Event): string {
   const meta = inlineParts([
-    e.live ? "LIVE" : formatEventWhen(e.start_at ?? e.next_start_at),
+    e.live ? "LIVE" : formatEventWhen(eventOccurrence(e).start ?? null),
     e.recurrent ? (e.recurrent_frequency ? clean(e.recurrent_frequency) : "recurring") : null,
     eventCoords(e),
     e.user_name || e.scene_name || null,
@@ -315,7 +315,7 @@ export function eventDetailToMarkdown(e: Event): string {
   const jump = e.url || playUrl({ position: `${e.x ?? 0},${e.y ?? 0}` });
 
   const facts: Array<[string, string | number | null | undefined]> = [
-    ["When", formatEventWhen(e.start_at ?? e.next_start_at)],
+    ["When", formatEventWhen(eventOccurrence(e).start ?? null)],
     ["Host", host],
     ["Location", eventCoords(e)],
     ["Recurring", e.recurrent ? (e.recurrent_frequency || "yes") : null],

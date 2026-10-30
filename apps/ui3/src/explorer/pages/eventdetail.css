@@ -78,6 +78,7 @@
   font-size: var(--fs-xs); font-weight: 800; letter-spacing: .04em;
   padding: 0 16px; height: 40px; border-radius: var(--r-control);
 }
+.evd__actions a.evd__remind { text-decoration: none; }
 .evd__remind:hover { background: rgba(0, 0, 0, .5); }
 .evd__remind:disabled { opacity: .6; cursor: default; }
 .evd__interested.is-on {

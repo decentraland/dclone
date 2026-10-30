@@ -1,7 +1,9 @@
-import { describe, it, expect, vi, afterEach } from 'vitest'
-import { fireEvent, render, screen, within } from '@testing-library/react'
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
+import { fireEvent, render, screen, within, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import * as auth from '../features/auth/sso'
 import { PlacesBrowser } from '../features/places/PlacesBrowser'
-import type { DiscoverPlace } from '../features/places/placesApi'
+import { clearPlacesCache, type DiscoverPlace } from '../features/places/placesApi'
 
 const place = (id: string, title: string, extra: Partial<DiscoverPlace> = {}): DiscoverPlace => ({
   id,
@@ -30,9 +32,37 @@ function servePlaces(): void {
   )
 }
 
-afterEach(() => vi.unstubAllGlobals())
+afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks() })
+beforeEach(clearPlacesCache)
 
 describe('places browser', () => {
+  it('keeps loaded cards visible while Retry requests the failed next page', async () => {
+    let failed = false
+    vi.stubGlobal('fetch', vi.fn(async (input: string) => {
+      const url = new URL(input)
+      if (url.searchParams.has('only_highlighted') || url.searchParams.get('limit') === '40') return new Response(JSON.stringify({ ok: true, total: 0, data: [] }))
+      if (url.searchParams.get('offset') === '48' && !failed) { failed = true; throw new Error('page unavailable') }
+      return new Response(JSON.stringify({ ok: true, total: 49, data: url.searchParams.get('offset') === '48' ? [other] : [busy] }))
+    }))
+    render(<PlacesBrowser onPick={vi.fn()} />)
+    await userEvent.click(await screen.findByRole('button', { name: 'Load more places' }))
+    expect(await screen.findByText("Couldn't load more places")).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Busy Club/ })).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    expect(await screen.findByRole('button', { name: /Other Scene/ })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Load more places' })).toBeNull()
+  })
+
+  it('hides unsupported sorting in personal sections and restores it for public discovery', async () => {
+    servePlaces()
+    vi.spyOn(auth, 'getLogin').mockResolvedValue(null)
+    render(<PlacesBrowser onPick={vi.fn()} />)
+    expect(screen.getByRole('button', { name: 'Most active' })).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('tab', { name: /Favourites/ }))
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Most active' })).toBeNull())
+    await userEvent.click(screen.getByRole('tab', { name: /Explore all/ }))
+    expect(screen.getByRole('button', { name: 'Most active' })).toBeInTheDocument()
+  })
   it('keeps Live Now to populated destinations, Featured to the curated set, and the grid to the rest', async () => {
     servePlaces()
     render(<PlacesBrowser onPick={vi.fn()} />)

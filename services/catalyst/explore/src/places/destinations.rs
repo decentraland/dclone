@@ -471,7 +471,9 @@ pub(crate) async fn list_destinations(
     pairs: &[(String, String)],
 ) -> Result<Json<ApiDataTotal<Destination>>, ApiError> {
     let (mut filters, only_favorites, flags) = parse_filters(pairs)?;
-    let user = state.viewer(headers, method, signed_path).await;
+    let user =
+        super::handlers::favorites_viewer(state, headers, method, signed_path, only_favorites)
+            .await?;
     if !state
         .places
         .scope_to_viewer(&mut filters, user.as_deref(), only_favorites)
