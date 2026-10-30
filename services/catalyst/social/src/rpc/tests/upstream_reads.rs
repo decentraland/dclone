@@ -210,16 +210,20 @@ fn requests(other: &str) -> [Vec<u8>; 10] {
     ]
 }
 
-/// Signs in as a key generated here and loads the module over `socket`.
+/// Signs in as a key generated here, delegated for ten minutes, and loads the
+/// module over `socket`.
 async fn sign_in(
     mut socket: WsStream,
     path: &str,
 ) -> (String, Value, RpcClient<TungsteniteTransport>, RawClient) {
     let root = PrivateKeySigner::random();
     let ephemeral = PrivateKeySigner::random();
-    let ts = chrono::Utc::now().timestamp_millis();
+    let now = chrono::Utc::now();
+    let expiration =
+        (now + chrono::Duration::minutes(10)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let ts = now.timestamp_millis();
     let payload = crate::shared::signed_fetch::build_payload_v6("get", path, &ts.to_string(), "{}");
-    let (signer, frame) = frame_signed(&root, &ephemeral, ts, &payload, "{}").await;
+    let (signer, frame) = frame_signed(&root, &ephemeral, &expiration, ts, &payload, "{}").await;
     drop((root, ephemeral));
     let chain = redacted_chain(&frame);
     socket.send(WsMessage::Text(frame.into())).await.unwrap();

@@ -294,34 +294,46 @@ pub fn validator_ref(
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
+    use std::sync::LazyLock;
+
     use alloy::signers::{Signer as _, local::PrivateKeySigner};
 
     use crate::signed_fetch::build_payload_v6;
 
-    pub const ROOT_KEY: &str = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
-    pub const EPHEMERAL_KEY: &str =
-        "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
+    /// The run's wallets, made fresh per process so no key is written out.
+    pub static ROOT_WALLET: LazyLock<PrivateKeySigner> = LazyLock::new(PrivateKeySigner::random);
+    pub static EPHEMERAL_WALLET: LazyLock<PrivateKeySigner> =
+        LazyLock::new(PrivateKeySigner::random);
+    /// The ephemeral link's expiry for frames that only reach this node.
+    pub const FAR_EXPIRATION: &str = "2099-01-01T00:00:00.000Z";
 
     /// A three-link chain (SIGNER, ECDSA_EPHEMERAL, ECDSA_SIGNED_ENTITY) as the
     /// explorer sends it: `signed_payload` is what the ephemeral key signs,
     /// `delivered_metadata` what the frame carries (they differ only in the
     /// re-cased-key attack shape). Returns `(lowercase signer, frame json)`.
     pub async fn frame_with(
-        root_key: &str,
+        root: &PrivateKeySigner,
         ts_ms: i64,
         signed_payload: &str,
         delivered_metadata: &str,
     ) -> (String, String) {
-        let root: PrivateKeySigner = root_key.parse().unwrap();
-        let ephemeral: PrivateKeySigner = EPHEMERAL_KEY.parse().unwrap();
-        frame_signed(&root, &ephemeral, ts_ms, signed_payload, delivered_metadata).await
+        frame_signed(
+            root,
+            &EPHEMERAL_WALLET,
+            FAR_EXPIRATION,
+            ts_ms,
+            signed_payload,
+            delivered_metadata,
+        )
+        .await
     }
 
-    /// [`frame_with`] over signers the caller holds, so a key need never be
-    /// written out as text.
+    /// [`frame_with`] with the ephemeral wallet the caller holds, valid until
+    /// `expiration` (an ISO timestamp).
     pub async fn frame_signed(
         root: &PrivateKeySigner,
         ephemeral: &PrivateKeySigner,
+        expiration: &str,
         ts_ms: i64,
         signed_payload: &str,
         delivered_metadata: &str,
@@ -329,7 +341,7 @@ pub mod test_support {
         let root_address = format!("{:#x}", root.address());
         let ephemeral_address = format!("{:#x}", ephemeral.address());
         let ephemeral_payload = format!(
-            "Decentraland Login\nEphemeral address: {ephemeral_address}\nExpiration: 2099-01-01T00:00:00.000Z"
+            "Decentraland Login\nEphemeral address: {ephemeral_address}\nExpiration: {expiration}"
         );
         let ephemeral_sig = root
             .sign_message(ephemeral_payload.as_bytes())
@@ -349,14 +361,14 @@ pub mod test_support {
         (root_address.to_lowercase(), frame.to_string())
     }
 
-    /// A frame signed by `root_key` for `get <path>` at `ts_ms` with `{}` metadata.
-    pub async fn frame_for(root_key: &str, path: &str, ts_ms: i64) -> (String, String) {
+    /// A frame signed by `root` for `get <path>` at `ts_ms` with `{}` metadata.
+    pub async fn frame_for(root: &PrivateKeySigner, path: &str, ts_ms: i64) -> (String, String) {
         let payload = build_payload_v6("get", path, &ts_ms.to_string(), "{}");
-        frame_with(root_key, ts_ms, &payload, "{}").await
+        frame_with(root, ts_ms, &payload, "{}").await
     }
 
     pub async fn frame(path: &str, ts_ms: i64) -> (String, String) {
-        frame_for(ROOT_KEY, path, ts_ms).await
+        frame_for(&ROOT_WALLET, path, ts_ms).await
     }
 }
 
@@ -688,7 +700,7 @@ mod tests {
         for delivered in [SCENE_METADATA, RECASED_KEY] {
             // Signed as delivered: the signature alone would accept it.
             let signed = build_payload_v6("get", "/", &ts_ms.to_string(), delivered);
-            let (_, frame) = frame_with(ROOT_KEY, ts_ms, &signed, delivered).await;
+            let (_, frame) = frame_with(&ROOT_WALLET, ts_ms, &signed, delivered).await;
             let err = verify(&frame, "get", &root(), now_secs).await.unwrap_err();
             assert!(
                 matches!(err, HandshakeError::RefusedSigner),
@@ -698,7 +710,7 @@ mod tests {
         // The re-cased-key attack shape: signed over the scene metadata,
         // delivered under the re-spelled key.
         let signed = build_payload_v6("get", "/", &ts_ms.to_string(), SCENE_METADATA);
-        let (_, frame) = frame_with(ROOT_KEY, ts_ms, &signed, RECASED_KEY).await;
+        let (_, frame) = frame_with(&ROOT_WALLET, ts_ms, &signed, RECASED_KEY).await;
         assert!(matches!(
             verify(&frame, "get", &root(), now_secs).await.unwrap_err(),
             HandshakeError::RefusedSigner
@@ -711,11 +723,11 @@ mod tests {
         let ts_ms = now_secs * 1000;
         let cased = r#"{"signer":"dcl:explorer","sceneId":"bafkreiAbC123"}"#;
         let v6 = build_payload_v6("get", "/", &ts_ms.to_string(), cased);
-        let (_, frame) = frame_with(ROOT_KEY, ts_ms, &v6, cased).await;
+        let (_, frame) = frame_with(&ROOT_WALLET, ts_ms, &v6, cased).await;
         assert!(verify(&frame, "get", &root(), now_secs).await.is_ok());
         let legacy =
             crate::signed_fetch::build_legacy_payload("get", "/", &ts_ms.to_string(), cased);
-        let (_, frame) = frame_with(ROOT_KEY, ts_ms, &legacy, cased).await;
+        let (_, frame) = frame_with(&ROOT_WALLET, ts_ms, &legacy, cased).await;
         let err = verify(&frame, "get", &root(), now_secs).await.unwrap_err();
         assert!(
             matches!(err, HandshakeError::InvalidSignature(_)),
@@ -733,8 +745,13 @@ mod tests {
             &ts_ms.to_string(),
             r#"{"sceneId":"bafkreiabcdef"}"#,
         );
-        let (_, frame) =
-            frame_with(ROOT_KEY, ts_ms, &signed, r#"{"sceneId":"BAFKREIABCDEF"}"#).await;
+        let (_, frame) = frame_with(
+            &ROOT_WALLET,
+            ts_ms,
+            &signed,
+            r#"{"sceneId":"BAFKREIABCDEF"}"#,
+        )
+        .await;
         let err = verify(&frame, "get", &root(), now_secs).await.unwrap_err();
         assert!(
             matches!(err, HandshakeError::InvalidSignature(_)),
@@ -748,7 +765,7 @@ mod tests {
         let ts_ms = now_secs * 1000;
         for raw in ["not json", "[]", "42"] {
             let signed = build_payload_v6("get", "/", &ts_ms.to_string(), raw);
-            let (_, frame) = frame_with(ROOT_KEY, ts_ms, &signed, raw).await;
+            let (_, frame) = frame_with(&ROOT_WALLET, ts_ms, &signed, raw).await;
             let err = verify(&frame, "get", &root(), now_secs).await.unwrap_err();
             assert!(
                 matches!(err, HandshakeError::MalformedChain { .. }),
