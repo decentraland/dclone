@@ -33,15 +33,16 @@ fn app(pool: PgPool) -> Router {
 }
 
 async fn call(app: &Router, method: Method, path: &str) -> (StatusCode, Option<String>, String) {
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(method)
-                .uri(path)
-                .body(Body::empty())
-                .unwrap(),
-        )
+    call_with(app, Request::builder().method(method).uri(path)).await
+}
+
+/// One request as `serve` sees it: the node trims a trailing slash first.
+async fn call_with(
+    app: &Router,
+    request: axum::http::request::Builder,
+) -> (StatusCode, Option<String>, String) {
+    let response = tower_http::normalize_path::NormalizePath::trim_trailing_slash(app.clone())
+        .oneshot(request.body(Body::empty()).unwrap())
         .await
         .unwrap();
     let status = response.status();
@@ -244,4 +245,44 @@ async fn a_failed_privacy_read_names_no_database_detail() {
         serde_json::from_str::<Value>(&body).unwrap(),
         json!({ "error": "Internal Server Error" })
     );
+}
+
+/// Upstream's `app.ws('/')` serves upgrades alone and its `ANY /*` answers the
+/// rest. A request with no `Sec-WebSocket-Key` is not an upgrade and gets the
+/// JSON 404; a broken upgrade (here version 12) keeps axum's own 400, since
+/// what uWS answers it is not in the reference's source (`docs/compatibility.md`).
+#[tokio::test]
+async fn only_a_request_that_is_not_an_upgrade_gets_the_json_404() {
+    let app = app(sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgres://nobody@127.0.0.1:1/nowhere")
+        .unwrap());
+    let (status, origin, body) = call_with(
+        &app,
+        Request::builder()
+            .uri("/social-rpc")
+            .header(header::CONNECTION, "upgrade")
+            .header(header::UPGRADE, "websocket"),
+    )
+    .await;
+    assert_eq!(
+        (status, origin.as_deref()),
+        (StatusCode::NOT_FOUND, Some("*"))
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).unwrap(),
+        json!({ "error": "Not Found" })
+    );
+
+    let (status, _, body) = call_with(
+        &app,
+        Request::builder()
+            .uri("/social-rpc")
+            .header(header::CONNECTION, "upgrade")
+            .header(header::UPGRADE, "websocket")
+            .header(header::SEC_WEBSOCKET_VERSION, "12")
+            .header(header::SEC_WEBSOCKET_KEY, "dGhlIHNhbXBsZSBub25jZQ=="),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(!body.contains("Not Found"), "{body}");
 }

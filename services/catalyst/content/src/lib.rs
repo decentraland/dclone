@@ -201,8 +201,7 @@ impl Settings {
         let map = config.map_urls();
         Self {
             version: env!("CARGO_PKG_VERSION").to_string(),
-            commit_hash: non_empty(&config.node.commit_hash)
-                .or_else(|| option_env!("CATALYST_COMMIT_HASH").map(str::to_string)),
+            commit_hash: config.commit_hash(),
             eth_network: config.node.eth_network.clone(),
             content_public_url: non_empty(&config.node.content_url)
                 .unwrap_or_else(|| format!("{public_url}/content/")),

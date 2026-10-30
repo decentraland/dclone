@@ -148,10 +148,10 @@ async fn ending_an_accepted_call_deletes_its_room() {
     // room, so the stub sees a delete when one is sent.
     let control = rig.accepted_call(&caller, &callee).await;
     let who = crate::shared::identity::Address::parse(&caller).unwrap();
-    gatekeeper::voice::end_private_voice_chat_by(&rig.runtime, &control.to_string(), &who)
-        .await
-        .unwrap();
-    assert!(rig.room_deleted(control), "the stub saw no delete");
+    let control_ended =
+        gatekeeper::voice::end_private_voice_chat_by(&rig.runtime, &control.to_string(), &who)
+            .await;
+    let control_deleted = rig.room_deleted(control);
     let ended = rig.accepted_call(&caller, &callee).await;
     let answer = SocialServiceImpl
         .end_private_voice_chat(
@@ -163,6 +163,13 @@ async fn ending_an_accepted_call_deletes_its_room() {
         .await
         .unwrap()
         .response;
+    let dropped = rig.accepted_call(&caller, &callee).await;
+    rig.ctx.end_private_voice_chat_on_disconnect(&caller).await;
+    let (ended_deleted, dropped_deleted) = (rig.room_deleted(ended), rig.room_deleted(dropped));
+    // Cleaned up before asserting: a failure leaves no call row to the sweep.
+    rig.finish(&[&caller, &callee]).await;
+    assert!(control_ended.is_ok(), "{control_ended:?}");
+    assert!(control_deleted, "the stub saw no delete");
     assert!(
         matches!(
             answer,
@@ -170,10 +177,6 @@ async fn ending_an_accepted_call_deletes_its_room() {
         ),
         "{answer:?}"
     );
-    let dropped = rig.accepted_call(&caller, &callee).await;
-    rig.ctx.end_private_voice_chat_on_disconnect(&caller).await;
-    let (ended_deleted, dropped_deleted) = (rig.room_deleted(ended), rig.room_deleted(dropped));
-    rig.finish(&[&caller, &callee]).await;
     assert!(ended_deleted, "End left the room of {ended} open");
     assert!(
         dropped_deleted,

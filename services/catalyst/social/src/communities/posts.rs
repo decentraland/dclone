@@ -238,7 +238,7 @@ pub async fn create_post(
         "communityId": uuid.as_uuid(),
         "authorAddress": signer.as_str(),
         "content": content,
-        "createdAt": super::dto::iso_ms::format(&created_at).to_string(),
+        "createdAt": crate::shared::as_of::wire(created_at.and_utc()),
     });
     (StatusCode::CREATED, Json(json!({ "data": data }))).into_response()
 }

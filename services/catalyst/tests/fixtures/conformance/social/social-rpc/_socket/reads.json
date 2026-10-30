@@ -113,7 +113,7 @@
     }
   ],
   "captured_from": "wss://rpc-social-service-ea.decentraland.org",
-  "description": "The eight read procedures of the social RPC, called once each by a wallet created for the run (no data behind it). The status reads name the zero address and a second address created for the run. Signatures in the chain are redacted; the keys were held in memory only.",
+  "description": "The eight read procedures of the social RPC, in ten calls (GetFriends and GetFriendshipStatus twice each) by a wallet created for the run (no data behind it). The status reads name the zero address and a second address created for the run. Signatures in the chain are redacted; the keys were held in memory only.",
   "other": "0xfa29419d7bd3fd7ec461e29ad5fe63d5605dfda1",
   "signer": "0x17d8e3dc00b830f9cf91898eb39a1d99585ea582",
   "started_at": "2026-10-28T09:53:02Z"

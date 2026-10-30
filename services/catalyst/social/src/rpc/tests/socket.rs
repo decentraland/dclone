@@ -62,6 +62,7 @@ async fn a_malformed_first_frame_closes_unauthorized() {
         ("x-identity-metadata", serde_json::Value::Null),
         ("x-identity-auth-chain-1", serde_json::json!(["{}", 1])),
         ("X-Identity-Foo", serde_json::json!(1)),
+        ("X-IDENTITY-METADATA", serde_json::json!({})),
     ] {
         let frame = valid_frame_with(key, value).await;
         assert_eq!(
@@ -70,6 +71,36 @@ async fn a_malformed_first_frame_closes_unauthorized() {
             "{key}"
         );
     }
+    server.jobs.shutdown(Duration::from_secs(2)).await;
+}
+
+/// `verify()` reads only the exact lowercase keys (`@dcl/crypto-middleware`
+/// 6.3.0 `dist/verify.js:72`, `:321-322`): a re-cased duplicate next to the
+/// lowercase header passes, and a timestamp sent only as
+/// `X-Identity-Timestamp` is absent, so the socket closes 3003.
+#[tokio::test]
+async fn a_re_cased_identity_header_is_never_read_on_the_socket() {
+    let server = spawn_server(None, 5).await;
+    for (key, value) in [
+        ("X-Identity-Timestamp", serde_json::json!([])),
+        ("X-Identity-Timestamp", serde_json::json!("0")),
+    ] {
+        let frame = valid_frame_with(key, value.clone()).await;
+        let answer = first_answer(&server, &frame).await;
+        assert!(is_server_ready(&answer), "{key} {value}: {answer:?}");
+    }
+    let (_, frame) = frame("/", chrono::Utc::now().timestamp_millis()).await;
+    let mut frame: serde_json::Value = serde_json::from_str(&frame).unwrap();
+    let ts = frame
+        .as_object_mut()
+        .unwrap()
+        .remove("x-identity-timestamp")
+        .unwrap();
+    frame["X-Identity-Timestamp"] = ts;
+    assert_eq!(
+        close_code(&first_answer(&server, &frame.to_string()).await),
+        Some(3003)
+    );
     server.jobs.shutdown(Duration::from_secs(2)).await;
 }
 

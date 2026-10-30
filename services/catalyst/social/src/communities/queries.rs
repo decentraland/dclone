@@ -150,8 +150,6 @@ type DetailRow = (
     bool,
     bool,
     bool,
-    NaiveDateTime,
-    NaiveDateTime,
     Option<String>,
     Option<bool>,
     i64,
@@ -173,7 +171,7 @@ pub async fn get_by_id(
     let sql = format!(
         "WITH {VOICE_CTE} \
          SELECT c.id, c.name, c.description, c.owner_address, c.private, c.active, c.unlisted, \
-                c.created_at, c.updated_at, m.role, b.active, \
+                m.role, b.active, \
                 {members_count}, \
                 (t.community_id IS NOT NULL), v.participants, v.moderators, {mirror_thumbnail} \
          FROM social.communities c \
@@ -200,8 +198,6 @@ pub async fn get_by_id(
         private,
         active,
         unlisted,
-        created_at,
-        updated_at,
         member_role,
         banned,
         members_count,
@@ -220,10 +216,7 @@ pub async fn get_by_id(
         owner_address,
         privacy: if private { "private" } else { "public" }.to_string(),
         active,
-        unlisted,
         members_count,
-        created_at,
-        updated_at,
         is_live: false,
         voice_chat_status: VoiceChatStatus::idle(),
         visibility: None,
@@ -257,7 +250,6 @@ type ListRow = (
     bool,
     bool,
     bool,
-    NaiveDateTime,
     Option<String>,
     i64,
     String,
@@ -352,7 +344,6 @@ pub async fn list(
     let select_sql = format!(
         "WITH {VOICE_CTE}, page AS ( \
          SELECT c.id, c.name, c.description, c.owner_address, c.private, c.active, c.unlisted, \
-                c.created_at, c.updated_at, \
                 {role_select} AS role, \
                 (t.community_id IS NOT NULL) AS has_thumbnail, \
                 (v.community_id IS NOT NULL) AS has_voice, \
@@ -367,7 +358,7 @@ pub async fn list(
          ORDER BY c.editors_choice DESC, c.ranking_score DESC, c.name ASC \
          LIMIT ${limit_idx} OFFSET ${offset_idx}) \
          SELECT p.id, p.name, p.description, p.owner_address, p.private, p.active, p.unlisted, \
-                p.created_at, {mirror_thumbnail}, \
+                {mirror_thumbnail}, \
                 {members_count} AS members_count, \
                 p.role, p.has_thumbnail, p.has_voice, p.vc_participants, p.vc_moderators, p.total \
          FROM page p \
@@ -380,7 +371,7 @@ pub async fn list(
     q = q.bind(pagination.limit).bind(pagination.offset);
     let rows = q.fetch_all(pool).await?;
 
-    let total = page_total(rows.first().map(|r| r.15), pagination.offset, async {
+    let total = page_total(rows.first().map(|r| r.14), pagination.offset, async {
         let count_sql =
             format!("WITH {VOICE_CTE} SELECT COUNT(*) FROM social.communities c LEFT JOIN voice v ON v.community_id = c.id WHERE {where_sql}");
         let mut cq = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(count_sql));
@@ -403,7 +394,6 @@ pub async fn list(
                 private,
                 active,
                 unlisted,
-                created_at,
                 mirror_thumbnail,
                 members_count,
                 role,
@@ -433,9 +423,7 @@ pub async fn list(
                     owner_address,
                     privacy: if private { "private" } else { "public" }.to_string(),
                     active,
-                    unlisted,
                     members_count,
-                    created_at,
                     is_live,
                     voice_chat_status,
                     visibility: signed
@@ -476,22 +464,21 @@ pub async fn member_communities(
     let limit_idx = if roles.is_some() { 3 } else { 2 };
     let offset_idx = limit_idx + 1;
     let select_sql = format!(
-        "SELECT c.id, c.name, c.owner_address, m.role, m.joined_at, COUNT(*) OVER () AS total \
+        "SELECT c.id, c.name, c.owner_address, m.role, COUNT(*) OVER () AS total \
          FROM social.community_members m JOIN social.communities c ON c.id = m.community_id \
          WHERE {where_sql} AND c.active \
-         ORDER BY CASE m.role WHEN 'owner' THEN 1 WHEN 'moderator' THEN 2 ELSE 3 END, c.name ASC \
+         ORDER BY CASE m.role WHEN 'owner' THEN 1 WHEN 'moderator' THEN 2 ELSE 3 END, c.name ASC, c.id \
          LIMIT ${limit_idx} OFFSET ${offset_idx}"
     );
-    let mut q = sqlx::query_as::<_, (Uuid, String, String, String, NaiveDateTime, i64)>(
-        sqlx::AssertSqlSafe(select_sql),
-    )
-    .bind(member);
+    let mut q =
+        sqlx::query_as::<_, (Uuid, String, String, String, i64)>(sqlx::AssertSqlSafe(select_sql))
+            .bind(member);
     if let Some(rs) = &roles {
         q = q.bind(rs.clone());
     }
     q = q.bind(pagination.limit).bind(pagination.offset);
     let rows = q.fetch_all(pool).await?;
-    let total = page_total(rows.first().map(|r| r.5), pagination.offset, async {
+    let total = page_total(rows.first().map(|r| r.4), pagination.offset, async {
             let count_sql = format!(
                 "SELECT COUNT(*) FROM social.community_members m JOIN social.communities c ON c.id = m.community_id \
                  WHERE {where_sql} AND c.active"
@@ -505,15 +492,12 @@ pub async fn member_communities(
         .await?;
     let results = rows
         .into_iter()
-        .map(
-            |(id, name, owner_address, role, joined_at, _)| MemberCommunity {
-                id,
-                name,
-                owner_address,
-                role,
-                joined_at,
-            },
-        )
+        .map(|(id, name, owner_address, role, _)| MemberCommunity {
+            id,
+            name,
+            owner_address,
+            role,
+        })
         .collect();
     Ok((results, total))
 }
@@ -1034,7 +1018,6 @@ pub async fn list_posts(
                     created_at,
                     likes_count,
                     liked_by_me,
-                    kind: "POST",
                 }
             },
         )
@@ -1136,21 +1119,29 @@ pub async fn moderation_all(
     search: Option<&str>,
     pagination: &Pagination,
 ) -> sqlx::Result<(Vec<CommunityForModeration>, i64)> {
-    let mut where_sql = "TRUE".to_string();
+    // upstream `getAllCommunitiesForModeration` (`communities-db.ts` at
+    // `fb3dcb8`): active communities, the name or description matching,
+    // the member count plus one, the largest first, then by name
+    let mut where_sql = "c.active".to_string();
     let mut params: Vec<String> = Vec::new();
     if let Some(s) = search {
         params.push(format!("%{}%", escape_like(s)));
-        where_sql.push_str(&format!(" AND name ILIKE ${}", params.len()));
+        let i = params.len();
+        where_sql.push_str(&format!(
+            " AND (c.name ILIKE ${i} OR c.description ILIKE ${i})"
+        ));
     }
     let limit_idx = params.len() + 1;
     let offset_idx = params.len() + 2;
+    let members_count = members_count_sql("c");
     let select_sql = format!(
-        "SELECT id, name, owner_address, active, unlisted, created_at, \
-                (SELECT COUNT(*) FROM social.community_members m WHERE m.community_id = communities.id) AS members_count \
-         FROM social.communities WHERE {where_sql} ORDER BY created_at DESC LIMIT ${limit_idx} OFFSET ${offset_idx}"
+        "SELECT c.id, c.name, c.description, c.owner_address, c.private, c.active, \
+                ({members_count} + 1)::int AS members_count, c.created_at \
+         FROM social.communities c WHERE {where_sql} \
+         ORDER BY members_count DESC, c.name ASC, c.id LIMIT ${limit_idx} OFFSET ${offset_idx}"
     );
-    let count_sql = format!("SELECT COUNT(*) FROM social.communities WHERE {where_sql}");
-    let mut q = sqlx::query_as::<_, (Uuid, String, String, bool, bool, NaiveDateTime, i64)>(
+    let count_sql = format!("SELECT COUNT(*) FROM social.communities c WHERE {where_sql}");
+    let mut q = sqlx::query_as::<_, (Uuid, String, String, String, bool, bool, i32, NaiveDateTime)>(
         sqlx::AssertSqlSafe(select_sql),
     );
     let mut cq = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(count_sql));
@@ -1164,15 +1155,16 @@ pub async fn moderation_all(
     let out = rows
         .into_iter()
         .map(
-            |(id, name, owner_address, active, unlisted, created_at, members_count)| {
+            |(id, name, description, owner_address, private, active, members_count, created_at)| {
                 CommunityForModeration {
                     id,
                     name,
+                    description,
                     owner_address,
+                    privacy: if private { "private" } else { "public" }.to_string(),
                     active,
-                    unlisted,
-                    created_at,
                     members_count,
+                    created_at,
                 }
             },
         )

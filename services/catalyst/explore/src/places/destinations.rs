@@ -577,22 +577,30 @@ fn by_selectors(selectors: BatchSelectors, viewer: Option<String>) -> PlaceListF
 }
 
 /// `POST /api/destinations` with an array body, for an in-process caller:
-/// the ids as `{"ids": ids}` (lowercased, matched by id only), the default
-/// flags, an anonymous viewer and at most `MAX_LIMIT` rows.
+/// the ids lowercased and matched by id only, the default flags, an
+/// anonymous viewer and at most `MAX_LIMIT` rows. As that route answers:
+/// no ids, no rows (not every destination); more than `MAX_BATCH_ITEMS`, 400.
 pub async fn destinations_by_ids(
     state: &ExploreState,
     ids: Vec<String>,
 ) -> Result<Vec<Destination>, ApiError> {
-    let body = Value::Array(ids.into_iter().map(Value::String).collect());
-    let Some(selectors) = parse_batch_body(&body)? else {
-        return Ok(Vec::new());
-    };
-    let filters = by_selectors(selectors, None);
-    if no_branch(&filters) {
+    if ids.is_empty() {
         return Ok(Vec::new());
     }
-    let flags = parse_with_options(&[])?;
-    Ok(list_page(state, filters, &flags).await?.0)
+    if ids.len() > MAX_BATCH_ITEMS {
+        return Err(ApiError::bad_request(format!(
+            "Too many items (max {MAX_BATCH_ITEMS})"
+        )));
+    }
+    let selectors = BatchSelectors {
+        ids: ids.into_iter().map(|id| id.to_lowercase()).collect(),
+        positions: Vec::new(),
+        world_names: Vec::new(),
+    };
+    let filters = by_selectors(selectors, None);
+    Ok(list_page(state, filters, &DestinationFlags::default())
+        .await?
+        .0)
 }
 
 #[cfg(test)]

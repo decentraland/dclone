@@ -5,6 +5,7 @@
 //! the live replay engine in `tests/support/conformance/` (`replay.rs`,
 //! `routes.rs`), which re-exports these modules.
 
+pub mod compare;
 pub mod diff;
 pub mod fixture;
 pub mod volatility;

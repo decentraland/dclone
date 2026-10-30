@@ -258,7 +258,6 @@ pub fn router(state: Arc<State>) -> Router {
             "/social-rpc/v1/users/{address}/privacy-settings",
             get(privacy_settings).head(not_found).fallback(not_found),
         )
-        .route("/social-rpc/", any(not_found))
         .route("/social-rpc/{*rest}", any(not_found))
         .layer(axum::middleware::map_response(allow_any_origin))
         .nest("/admin/social", admin::router())
@@ -298,18 +297,14 @@ async fn privacy_settings(
     AxumState(state): AxumState<Arc<State>>,
     Path(address): Path<String>,
 ) -> Response {
-    let address = address.to_lowercase();
-    let valid = address.len() == 42
-        && address.starts_with("0x")
-        && address[2..].bytes().all(|b| b.is_ascii_hexdigit());
-    if !valid {
+    let Ok(address) = crate::shared::identity::Address::parse_untrimmed(&address) else {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": "Invalid address" })),
         )
             .into_response();
-    }
-    match state.ctx.db().get_social_settings(&address).await {
+    };
+    match state.ctx.db().get_social_settings(address.as_str()).await {
         Ok(row) => Json(json!({
             "private_messages_privacy": row.unwrap_or_default().private_messages_privacy,
         }))

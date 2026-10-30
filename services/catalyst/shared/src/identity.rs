@@ -70,6 +70,16 @@ impl Address {
         Ok(Self(format!("0x{}", hex.to_ascii_lowercase())))
     }
 
+    /// social-service-ea's `normalizeAddress` then `EthAddress.validate`:
+    /// lowercased and never trimmed, so a surrounding space is refused where
+    /// [`Address::parse`] would trim it.
+    pub fn parse_untrimmed(raw: &str) -> Result<Self, AddressError> {
+        if raw.trim() != raw {
+            return Err(AddressError::Malformed(truncate(raw)));
+        }
+        Self::parse(raw)
+    }
+
     /// The verified signer of a signed-fetch request; `Signer` is already the
     /// lowercased SIGNER link, so this cannot fail.
     pub fn from_signer(signer: &Signer) -> Self {

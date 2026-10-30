@@ -659,11 +659,7 @@ async fn social_domains(pool: &PgPool, writes: bool, token: Option<&str>) -> Dom
         communities,
         None,
         &Outbound::for_tests(),
-        Arc::new(crate::explore::ExploreState::new(
-            pool.clone(),
-            crate::explore::Settings::for_tests(),
-            None,
-        )),
+        crate::social::communities::State::explore_for_tests(&pool),
     ));
     let notifications = crate::social::notifications::Settings {
         admin_token: token.clone(),

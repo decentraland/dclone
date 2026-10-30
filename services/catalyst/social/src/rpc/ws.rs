@@ -26,9 +26,16 @@ pub async fn ws_upgrade(
     uri: Uri,
     ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 ) -> Response {
-    // upstream's `app.ws('/')` takes upgrades only; any other request falls to its `ANY /*`
-    let Ok(ws) = ws else {
-        return super::not_found().await;
+    // upstream's `app.ws('/')` takes upgrades only; a request that is not one
+    // (no `Sec-WebSocket-Key`) falls to its `ANY /*`. A broken upgrade keeps
+    // axum's answer (400, 405 or 426): what uWS answers it is not in the
+    // reference's source.
+    let ws = match ws {
+        Ok(ws) => ws,
+        Err(_) if !headers.contains_key(axum::http::header::SEC_WEBSOCKET_KEY) => {
+            return super::not_found().await;
+        }
+        Err(rejection) => return rejection.into_response(),
     };
     let paths = candidate_paths(&headers, uri.path());
     ws.max_message_size(state.settings.ws_max_payload_bytes)

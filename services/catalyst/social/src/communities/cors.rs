@@ -42,8 +42,7 @@ pub async fn social_api_cors(req: Request, next: Next) -> Response {
     } else {
         let mut resp = next.run(req).await;
         if has_origin {
-            resp.headers_mut()
-                .insert(header::VARY, HeaderValue::from_static(VARY));
+            vary_accept_encoding(resp.headers_mut());
         }
         resp
     };
@@ -59,4 +58,47 @@ pub async fn social_api_cors(req: Request, next: Next) -> Response {
         HeaderValue::from_static("nosniff"),
     );
     resp
+}
+
+/// Adds `accept-encoding` to `Vary` unless a value already names it; any
+/// `Vary` the handler set is kept.
+fn vary_accept_encoding(headers: &mut axum::http::HeaderMap) {
+    let named = headers.get_all(header::VARY).iter().any(|v| {
+        v.to_str()
+            .is_ok_and(|s| s.split(',').any(|t| t.trim().eq_ignore_ascii_case(VARY)))
+    });
+    if !named {
+        headers.append(header::VARY, HeaderValue::from_static(VARY));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::HeaderMap;
+
+    use super::*;
+
+    fn vary(existing: &[&str]) -> Vec<String> {
+        let mut headers = HeaderMap::new();
+        for v in existing {
+            headers.append(header::VARY, HeaderValue::from_str(v).unwrap());
+        }
+        vary_accept_encoding(&mut headers);
+        headers
+            .get_all(header::VARY)
+            .iter()
+            .map(|v| v.to_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// A handler's own `Vary` survives; `accept-encoding` is added once.
+    #[test]
+    fn vary_keeps_the_handlers_values_and_names_accept_encoding_once() {
+        assert_eq!(vary(&[]), ["accept-encoding"]);
+        assert_eq!(vary(&["origin"]), ["origin", "accept-encoding"]);
+        assert_eq!(
+            vary(&["Origin, Accept-Encoding"]),
+            ["Origin, Accept-Encoding"]
+        );
+    }
 }

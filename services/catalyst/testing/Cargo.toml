@@ -6,8 +6,10 @@ description = "Conformance fixtures, diffing and volatility scrubs the catalyst 
 publish = false
 
 [dependencies]
+base64.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+urlencoding.workspace = true
 
 [features]
 ts = []
