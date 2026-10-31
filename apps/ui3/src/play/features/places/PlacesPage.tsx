@@ -15,12 +15,14 @@ export interface PlacesState {
 
 export function PlacesPage({
   places,
+  account,
   profile,
   onNavigate,
   onTeleport,
   onVisitWorld
 }: {
   places: PlacesState
+  account?: string | null
   profile: ProfileState
   onNavigate: (page: string) => void
   onTeleport: (x: number, y: number) => void
@@ -47,7 +49,7 @@ export function PlacesPage({
       onNavigate={onNavigate}
       onClose={places.toggle}
     >
-      <PlacesBrowser onPick={visit} />
+      <PlacesBrowser account={account} onPick={visit} />
     </MainMenuShell>
   )
 }

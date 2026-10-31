@@ -3,6 +3,8 @@
 // are kept side-effect free so they're unit-testable.
 
 import { serviceUrl } from '../../lib/baseDomain'
+import { inShell, shellRequest } from '../../lib/shell'
+import type { StoredLogin } from '../auth/sso'
 
 const API_BASE = `${serviceUrl('places')}/api`
 
@@ -66,8 +68,17 @@ function buildParams(args: FetchPlacesArgs, withCategories: boolean): URLSearchP
   return params
 }
 
-async function getPlaces(path: string, params: URLSearchParams): Promise<PlacesResponse> {
-  const res = await fetch(`${API_BASE}${path}?${params.toString()}`)
+async function getPlaces(path: string, params: URLSearchParams, login?: StoredLogin): Promise<PlacesResponse> {
+  const url = `${API_BASE}${path}?${params.toString()}`
+  let headers: Record<string, string> | undefined
+  if (login) {
+    const { signFetch, localSigner } = await import('../editorHost/host/sign')
+    const sign = inShell
+      ? (address: string, message: string) => shellRequest<string>('sign', { signer: address, message })
+      : localSigner(login.identity)
+    headers = await signFetch(login.identity, 'GET', url, sign, {})
+  }
+  const res = await fetch(url, { headers })
   if (!res.ok) throw new Error(`places API ${path} failed: ${res.status}`)
   const json = (await res.json()) as Partial<PlacesResponse>
   if (json.ok !== true || !Array.isArray(json.data)) throw new Error(`places API ${path} returned not-ok`)
@@ -82,6 +93,11 @@ async function getPlaces(path: string, params: URLSearchParams): Promise<PlacesR
 // consumer guards against stale results itself rather than aborting a promise others may share.
 const CACHE_TTL = 5 * 60_000
 const cache = new Map<string, { at: number; promise: Promise<PlacesResponse> }>()
+
+/** Drop public catalogue snapshots when a consumer explicitly needs fresh reads. */
+export function clearPlacesCache(): void {
+  cache.clear()
+}
 
 function cachedGet(path: string, params: URLSearchParams): Promise<PlacesResponse> {
   const url = `${path}?${params.toString()}`
@@ -117,9 +133,10 @@ export interface FetchDestinationsArgs {
   categories?: string[]
   owner?: string
   only_highlighted?: boolean
+  only_favorites?: boolean
 }
 
-export function fetchDestinations(args: FetchDestinationsArgs = {}): Promise<PlacesResponse> {
+export function fetchDestinations(args: FetchDestinationsArgs = {}, login?: StoredLogin): Promise<PlacesResponse> {
   const params = new URLSearchParams()
   params.set('limit', String(args.limit ?? 24))
   params.set('offset', String(args.offset ?? 0))
@@ -128,10 +145,15 @@ export function fetchDestinations(args: FetchDestinationsArgs = {}): Promise<Pla
   if (q && q.length >= 3) params.set('search', q)
   if (args.owner) params.set('owner', args.owner)
   if (args.only_highlighted) params.set('only_highlighted', 'true')
+  if (args.only_favorites) {
+    if (!login || login.guest) return Promise.reject(new Error('Sign in to see your favourites.'))
+    params.set('only_favorites', 'true')
+  }
   params.set('with_realms_detail', 'true')
   params.set('with_live_events', 'true')
   for (const c of args.categories ?? []) params.append('categories', c)
-  return cachedGet('/destinations', params)
+  // Personal results must never enter the shared public cache or survive an account switch.
+  return args.only_favorites ? getPlaces('/destinations', params, login) : cachedGet('/destinations', params)
 }
 
 export const BROWSE_ARGS = { limit: 48, offset: 0, order_by: 'most_active' as const }

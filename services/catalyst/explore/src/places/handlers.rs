@@ -11,6 +11,24 @@ use super::{CategoryTarget, PlaceListFilters, PlaceOrderBy, PlaceRow, PlaceStatu
 use crate::SharedState;
 use crate::shared::errors::{ApiData, ApiDataTotal, ApiDataTotalMap, ApiError};
 
+/// Explicit favorites requests must not disguise a failed signed login as an empty list.
+/// Keep the legacy unsigned read empty; public optional viewer reads remain anonymous.
+pub(crate) async fn favorites_viewer(
+    state: &SharedState,
+    headers: &HeaderMap,
+    method: &str,
+    path: &str,
+    only_favorites: bool,
+) -> Result<Option<String>, ApiError> {
+    let has_auth = headers
+        .keys()
+        .any(|name| name.as_str().starts_with("x-identity-"));
+    if only_favorites && has_auth {
+        return state.signer(headers, method, path).await.map(Some);
+    }
+    Ok(state.viewer(headers, method, path).await)
+}
+
 pub async fn get_place(
     State(state): State<SharedState>,
     method: Method,
@@ -43,10 +61,17 @@ pub async fn get_place_list(
     Query(pairs): Query<Vec<(String, String)>>,
 ) -> Result<Json<ApiDataTotal<PlaceRow>>, ApiError> {
     let mut filters = parse_filters(&pairs);
-    let user = state.viewer(&headers, method.as_str(), uri.path()).await;
     let only_favorites = pairs
         .iter()
         .any(|(k, v)| k == "only_favorites" && matches!(v.as_str(), "true" | "1"));
+    let user = favorites_viewer(
+        &state,
+        &headers,
+        method.as_str(),
+        uri.path(),
+        only_favorites,
+    )
+    .await?;
     if !state
         .places
         .scope_to_viewer(&mut filters, user.as_deref(), only_favorites)
@@ -310,13 +335,20 @@ pub async fn get_world_list(
             .map(|(_, v)| v.clone())
             .collect::<Vec<_>>()
     };
-    let user = state.viewer(&headers, method.as_str(), uri.path()).await;
     let bool_q = |k: &str| {
         get(k)
             .map(|v| matches!(v.as_str(), "true" | "1"))
             .unwrap_or(false)
     };
     let only_favorites = bool_q("only_favorites");
+    let user = favorites_viewer(
+        &state,
+        &headers,
+        method.as_str(),
+        uri.path(),
+        only_favorites,
+    )
+    .await?;
     let limit = get("limit")
         .and_then(|s| s.parse::<i64>().ok())
         .unwrap_or(100)
@@ -536,5 +568,216 @@ mod tests {
             serde_json::to_value(&entry).unwrap()["realms_detail"],
             serde_json::json!([])
         );
+    }
+    // The client signFetch + personalSign shape, for the fixture's own wallet.
+    async fn hud_client_headers(
+        owner: &alloy_signer_local::PrivateKeySigner,
+        path: &str,
+        timestamp: &str,
+    ) -> HeaderMap {
+        use alloy_signer::Signer;
+        use alloy_signer_local::PrivateKeySigner;
+        use axum::http::{HeaderName, HeaderValue};
+        let ephemeral: PrivateKeySigner = format!("0x{}", "11".repeat(32)).parse().unwrap();
+        let delegation = format!(
+            "Decentraland Login\nEphemeral address: {:#x}\nExpiration: 2099-01-01T00:00:00.000Z",
+            ephemeral.address()
+        );
+        let delegation_signature = owner
+            .sign_message(delegation.as_bytes())
+            .await
+            .unwrap()
+            .to_string();
+        let payload = format!("GET:{path}:{timestamp}:{{}}").to_lowercase();
+        let signature = ephemeral
+            .sign_message(payload.as_bytes())
+            .await
+            .unwrap()
+            .to_string();
+        let links = [
+            serde_json::json!({"type":"SIGNER","payload":format!("{:#x}",owner.address()),"signature":""}),
+            serde_json::json!({"type":"ECDSA_EPHEMERAL","payload":delegation,"signature":delegation_signature}),
+            serde_json::json!({"type":"ECDSA_SIGNED_ENTITY","payload":payload,"signature":signature}),
+        ];
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-identity-timestamp",
+            HeaderValue::from_str(timestamp).unwrap(),
+        );
+        headers.insert("x-identity-metadata", HeaderValue::from_static("{}"));
+        for (index, link) in links.iter().enumerate() {
+            headers.insert(
+                HeaderName::from_bytes(format!("x-identity-auth-chain-{index}").as_bytes())
+                    .unwrap(),
+                HeaderValue::from_str(&link.to_string()).unwrap(),
+            );
+        }
+        headers
+    }
+
+    #[tokio::test]
+    async fn hud_favorites_signature_matches_the_actual_client_vector() {
+        let owner = crate::shared::signed_fetch::test_support::KEY
+            .parse()
+            .unwrap();
+        let headers = hud_client_headers(&owner, "/places/api/destinations", "1793217600000").await;
+        let delegation: serde_json::Value =
+            serde_json::from_str(headers["x-identity-auth-chain-1"].to_str().unwrap()).unwrap();
+        assert_eq!(
+            delegation["signature"],
+            "0x9163f5d66c4554b3c3a4c0027a37ec781b89726320742ab6ffac9e368927d5e46642c1c14669675237fe96b6064d072e7f34352a8f61e2c827c3044a386728891c"
+        );
+        let link: serde_json::Value =
+            serde_json::from_str(headers["x-identity-auth-chain-2"].to_str().unwrap()).unwrap();
+        assert_eq!(
+            link["payload"],
+            "get:/places/api/destinations:1793217600000:{}"
+        );
+        assert_eq!(
+            link["signature"],
+            "0x30ad979298e9191c99c1f8de0580beefa79f73cd878f1524b494a59f074a90147dbf2912bda2ced98dd8f8efe9fb4ebcfee52105018c847b9db670c3a71d529b1b"
+        );
+    }
+
+    /// Full gateway path verifies through nesting; a stripping proxy needs its
+    /// original-path header. Failed authentication must not mimic an empty wallet.
+    #[tokio::test]
+    async fn hud_signed_favorites_roundtrip_preserves_gateway_path_and_reports_auth_failure() {
+        use alloy_signer_local::PrivateKeySigner;
+        use axum::{
+            Router,
+            body::{Body, to_bytes},
+            http::{Request, StatusCode},
+        };
+        use std::sync::Arc;
+        use tower::ServiceExt;
+        let Some(pool) = crate::db::scratch::pool(3).await else {
+            return;
+        };
+        let state = Arc::new(crate::ExploreState::new(
+            pool.clone(),
+            crate::Settings::for_tests(),
+            None,
+        ));
+        let local = crate::router(state);
+        let prefixed = Router::new().nest("/places", local.clone());
+        let owner = PrivateKeySigner::random();
+        let user = format!("{:#x}", owner.address());
+        for (id, position, world) in [
+            ("favorite-native", "23,24", false),
+            ("favorite-other", "25,26", false),
+            ("favorite-world", "27,28", true),
+        ] {
+            let name = world.then_some("favorite-world.dcl.eth");
+            sqlx::query("INSERT INTO explore.place (id,base_position,title,highlighted,raw) VALUES ($1,$2,$1,true,$3)")
+                .bind(id).bind(position).bind(serde_json::json!({"image":"https://native.example/cover.png","owner":user,"positions":[position],"world":world,"world_name":name}))
+                .execute(&pool).await.unwrap();
+        }
+        sqlx::query("INSERT INTO explore.user_favorites (\"user\",entity_id) VALUES ($1,'favorite-native'),($1,'favorite-world'),('0xother','favorite-other')")
+            .bind(&user).execute(&pool).await.unwrap();
+        let timestamp = chrono::Utc::now().timestamp_millis().to_string();
+        for (endpoint, expected_ids) in [
+            (
+                "api/destinations",
+                vec!["favorite-native", "favorite-world"],
+            ),
+            ("v1/destinations", vec!["favorite-native", "favorite-world"]),
+            ("api/places", vec!["favorite-native"]),
+            ("api/worlds", vec!["favorite-world"]),
+        ] {
+            let signed_path = format!("/places/{endpoint}");
+            let gateway_uri = format!("{signed_path}?only_favorites=true");
+            let local_uri = format!("/{endpoint}?only_favorites=true");
+            let signed = hud_client_headers(&owner, &signed_path, &timestamp).await;
+            for (app, uri, original) in [
+                (&prefixed, gateway_uri.as_str(), None),
+                (&local, local_uri.as_str(), Some(gateway_uri.as_str())),
+            ] {
+                let mut request = Request::builder().uri(uri).body(Body::empty()).unwrap();
+                *request.headers_mut() = signed.clone();
+                if let Some(original) = original {
+                    request
+                        .headers_mut()
+                        .insert("x-original-path", original.parse().unwrap());
+                }
+                let response = app.clone().oneshot(request).await.unwrap();
+                assert_eq!(response.status(), StatusCode::OK, "{endpoint}");
+                let body: serde_json::Value = serde_json::from_slice(
+                    &to_bytes(response.into_body(), 1024 * 1024).await.unwrap(),
+                )
+                .unwrap();
+                let mut ids: Vec<_> = body["data"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|row| {
+                        assert_eq!(row["user_favorite"], true, "{endpoint}: {row}");
+                        row["id"].as_str().unwrap()
+                    })
+                    .collect();
+                ids.sort_unstable();
+                assert_eq!(ids, expected_ids, "{endpoint}: {body}");
+                assert_eq!(body["total"], expected_ids.len(), "{endpoint}: {body}");
+            }
+            let mut corrupt = signed.clone();
+            let mut link: serde_json::Value =
+                serde_json::from_str(corrupt["x-identity-auth-chain-2"].to_str().unwrap()).unwrap();
+            link["signature"] = serde_json::json!(format!("0x{}", "00".repeat(65)));
+            corrupt.insert("x-identity-auth-chain-2", link.to_string().parse().unwrap());
+            for headers in [
+                corrupt.clone(),
+                hud_client_headers(
+                    &owner,
+                    &format!("/{}", endpoint.rsplit('/').next().unwrap()),
+                    &timestamp,
+                )
+                .await,
+                hud_client_headers(
+                    &owner,
+                    &signed_path,
+                    &(chrono::Utc::now().timestamp_millis() - 600_000).to_string(),
+                )
+                .await,
+                HeaderMap::from_iter([(
+                    axum::http::HeaderName::from_static("x-identity-timestamp"),
+                    "broken".parse().unwrap(),
+                )]),
+            ] {
+                let mut request = Request::builder()
+                    .uri(&gateway_uri)
+                    .body(Body::empty())
+                    .unwrap();
+                *request.headers_mut() = headers;
+                let response = prefixed.clone().oneshot(request).await.unwrap();
+                assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{endpoint}");
+            }
+            let response = prefixed
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(&gateway_uri)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{endpoint}");
+            let body: serde_json::Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 1024).await.unwrap())
+                    .unwrap();
+            assert_eq!(body["total"], 0, "{endpoint}: {body}");
+            assert_eq!(body["data"], serde_json::json!([]), "{endpoint}: {body}");
+            // Optional viewer authentication remains anonymous for public reads.
+            let mut request = Request::builder()
+                .uri(&signed_path)
+                .body(Body::empty())
+                .unwrap();
+            *request.headers_mut() = corrupt;
+            assert_eq!(
+                prefixed.clone().oneshot(request).await.unwrap().status(),
+                StatusCode::OK,
+                "{endpoint}"
+            );
+        }
     }
 }

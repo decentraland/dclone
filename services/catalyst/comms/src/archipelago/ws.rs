@@ -467,11 +467,18 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                 }
             }
             _ = renewal.tick(), if registration.as_ref().is_some_and(|current| current.fence.is_some()) => {
-                let owner = &registration.as_ref().unwrap().fence.as_ref().unwrap().owner;
-                if !matches!(tokio::time::timeout(
+                let current = registration.as_ref().unwrap();
+                let owner = &current.fence.as_ref().unwrap().owner;
+                match tokio::time::timeout(
                     AUTHORITY_OPERATION_TIMEOUT, state.control_v4.renew(owner),
-                ).await,Ok(Ok(()))) {
-                    break;
+                ).await {
+                    Ok(Ok(())) => {}
+                    // A newer session owns the wallet: tell the client, as the ownership poll does.
+                    Ok(Err(crate::archipelago::control_v4::V4Error::AuthorityConflict)) => {
+                        let _ = send_packet(&mut socket, kicked_packet(), Some(&current.link), &state.feed).await;
+                        break;
+                    }
+                    _ => break,
                 }
             }
         }

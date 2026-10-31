@@ -53,6 +53,7 @@ pub struct EventListQuery {
     pub schedule: Option<String>,
     pub owner: Option<String>,
     pub with_connected_users: Option<String>,
+    pub with_recurrent_dates: Option<String>,
     pub approved: Option<String>,
     pub rejected: Option<String>,
     pub deleted: Option<String>,
@@ -82,6 +83,7 @@ impl EventListQuery {
                 "schedule" => q.schedule = Some(v.clone()),
                 "owner" => q.owner = Some(v.clone()),
                 "with_connected_users" => q.with_connected_users = Some(v.clone()),
+                "with_recurrent_dates" => q.with_recurrent_dates = Some(v.clone()),
                 "approved" => q.approved = Some(v.clone()),
                 "rejected" => q.rejected = Some(v.clone()),
                 "deleted" => q.deleted = Some(v.clone()),
@@ -232,6 +234,12 @@ fn parse_filters(
         positions,
         estate_id,
         community_id,
+        schedule: q.schedule.clone(),
+        with_recurrent_dates: q
+            .with_recurrent_dates
+            .as_deref()
+            .and_then(parse_bool)
+            .unwrap_or(false),
         places_ids,
         destination_ids: Vec::new(),
         from,
@@ -369,10 +377,7 @@ async fn list_with(
         .and_then(parse_bool)
         .unwrap_or(false)
     {
-        // No comms service in v2 yet: an unknown room reads as nobody known, never a made-up list.
-        for e in &mut events {
-            e.connected_addresses = Some(Vec::new());
-        }
+        fill_connected(&mut events, &state.live).await;
     }
     let data = if envelope_with_total {
         EventListData::WithTotal(EventListWithTotal { events, total })
@@ -380,6 +385,32 @@ async fn list_with(
         EventListData::Events(events)
     };
     Ok(Json(ApiData::ok(data)))
+}
+
+pub(super) async fn fill_connected(
+    events: &mut [EventRecord],
+    live: &std::sync::Arc<crate::places::live::Live>,
+) {
+    let keys = events
+        .iter()
+        .map(|event| connected_key(event.world, event.server.as_deref(), event.x, event.y))
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    let connected = live.connected_by_key(keys).await;
+    for e in events {
+        let key = connected_key(e.world, e.server.as_deref(), e.x, e.y);
+        // Legacy events clients expect an array; a failed/unknown room
+        // lookup keeps the upstream's empty-array fallback.
+        e.connected_addresses = Some(connected.get(&key).cloned().flatten().unwrap_or_default());
+    }
+}
+
+fn connected_key(world: bool, server: Option<&str>, x: i32, y: i32) -> (bool, String) {
+    match server.filter(|server| world && !server.is_empty()) {
+        Some(server) => (true, server.to_ascii_lowercase()),
+        None => (false, format!("{x},{y}")),
+    }
 }
 
 pub async fn get_event_list(

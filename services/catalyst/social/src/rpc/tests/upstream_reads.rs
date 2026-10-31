@@ -2,13 +2,16 @@
 //! service (`wss://rpc-social-service-ea.decentraland.org`). The capture is an
 //! ignored test run by hand with `CATALYST_SOCIAL_RPC_CAPTURE=1`: it signs in
 //! with a key generated for the run and held only in memory, calls the eight
-//! reads below once each (no subscription, no write), and writes the request
+//! read procedures below (ten calls: `GetFriends` and `GetFriendshipStatus`
+//! twice each; no subscription, no write), and writes the request
 //! and response bytes to `tests/fixtures/conformance/social/social-rpc/_socket/reads.json`
 //! with the chain's signatures redacted (the HTTP replay skips `_` folders).
 //! The status reads name the zero address or a second address generated for
 //! the run, never a real user. The replay sends the recorded requests to the
 //! local `/social-rpc` as a wallet without data and expects the same bytes
-//! back.
+//! back; it first clears the stored settings of the two named addresses, the
+//! only rows of the shared database those answers read (the caller is new, so
+//! no friendship or block can involve it).
 
 use alloy::signers::local::PrivateKeySigner;
 use base64::Engine as _;
@@ -284,7 +287,7 @@ async fn capture() {
         }));
     }
     let fixture = json!({
-        "description": "The eight read procedures of the social RPC, called once each by a wallet created for the run (no data behind it). The status reads name the zero address and a second address created for the run. Signatures in the chain are redacted; the keys were held in memory only.",
+        "description": "The eight read procedures of the social RPC, in ten calls (GetFriends and GetFriendshipStatus twice each) by a wallet created for the run (no data behind it). The status reads name the zero address and a second address created for the run. Signatures in the chain are redacted; the keys were held in memory only.",
         "captured_from": UPSTREAM,
         "started_at": started.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         "signer": signer,
@@ -308,6 +311,13 @@ async fn the_reads_answer_as_production_does() {
     };
     let fixture: Value =
         serde_json::from_str(&std::fs::read_to_string(fixture_path()).unwrap()).unwrap();
+    for named in [ZERO, fixture["other"].as_str().unwrap()] {
+        sqlx::query("DELETE FROM social.user_settings WHERE address = $1")
+            .bind(named)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
     // The server runs the private-voice expiry sweep against the scratch pool.
     let _turn = VOICE_TABLE.lock().await;
     let server = spawn_server(Some(pool), 5).await;

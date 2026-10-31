@@ -11,17 +11,14 @@ use super::profiles::NameColor;
 
 /// A UTC time as production writes it (`Date.toJSON`: milliseconds, then
 /// `Z`; `2025-08-20T19:31:24.575Z`, `.000` on a whole second), the
-/// microseconds cut as `pg` does when it reads the column into a `Date`.
+/// microseconds cut as `pg` does when it reads the column into a `Date`:
+/// [`as_of::wire`](crate::shared::as_of::wire)'s form, as a `with` adapter.
 pub mod iso_ms {
     use chrono::NaiveDateTime;
     use serde::Serializer;
 
     pub fn serialize<S: Serializer>(t: &NaiveDateTime, s: S) -> Result<S::Ok, S::Error> {
-        s.collect_str(&format(t))
-    }
-
-    pub fn format(t: &NaiveDateTime) -> impl std::fmt::Display + '_ {
-        t.format("%Y-%m-%dT%H:%M:%S%.3fZ")
+        s.serialize_str(&crate::shared::as_of::wire(t.and_utc()))
     }
 }
 
@@ -67,15 +64,9 @@ pub struct CommunityListItem {
     pub owner_address: String,
     pub privacy: String,
     pub active: bool,
-    #[serde(skip)]
-    #[cfg_attr(feature = "ts", ts(skip))]
-    pub unlisted: bool,
     #[serde(rename = "membersCount")]
     #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub members_count: i64,
-    #[serde(skip)]
-    #[cfg_attr(feature = "ts", ts(skip))]
-    pub created_at: NaiveDateTime,
     #[serde(rename = "isLive")]
     pub is_live: bool,
     #[serde(rename = "voiceChatStatus")]
@@ -118,18 +109,9 @@ pub struct CommunityDetail {
     pub owner_address: String,
     pub privacy: String,
     pub active: bool,
-    #[serde(skip)]
-    #[cfg_attr(feature = "ts", ts(skip))]
-    pub unlisted: bool,
     #[serde(rename = "membersCount")]
     #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub members_count: i64,
-    #[serde(skip)]
-    #[cfg_attr(feature = "ts", ts(skip))]
-    pub created_at: NaiveDateTime,
-    #[serde(skip)]
-    #[cfg_attr(feature = "ts", ts(skip))]
-    pub updated_at: NaiveDateTime,
     #[serde(rename = "isLive")]
     pub is_live: bool,
     #[serde(rename = "voiceChatStatus")]
@@ -161,9 +143,6 @@ pub struct MemberCommunity {
     #[serde(rename = "ownerAddress")]
     pub owner_address: String,
     pub role: String,
-    /// Not on the wire: production's row has no join time and nothing here reads one.
-    #[serde(skip)]
-    pub joined_at: NaiveDateTime,
 }
 
 #[derive(Debug, Serialize)]
@@ -260,9 +239,6 @@ pub struct CommunityPost {
     pub likes_count: i64,
     #[serde(rename = "isLikedByUser")]
     pub liked_by_me: bool,
-    /// Not on the wire: production's post has no `type` and nothing here reads one.
-    #[serde(skip)]
-    pub kind: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -293,18 +269,22 @@ pub struct CommunityInvite {
     pub name: String,
 }
 
+/// A row of `GET /v1/moderation/communities` as upstream's
+/// `getAllCommunitiesForModeration` selects it (`communities-db.ts` at
+/// `fb3dcb8`), its `createdAt` as `Date.toJSON` writes it.
 #[derive(Debug, Serialize)]
 pub struct CommunityForModeration {
     pub id: Uuid,
     pub name: String,
+    pub description: String,
     #[serde(rename = "ownerAddress")]
     pub owner_address: String,
+    pub privacy: String,
     pub active: bool,
-    pub unlisted: bool,
-    #[serde(rename = "createdAt")]
-    pub created_at: NaiveDateTime,
     #[serde(rename = "membersCount")]
-    pub members_count: i64,
+    pub members_count: i32,
+    #[serde(rename = "createdAt", with = "iso_ms")]
+    pub created_at: NaiveDateTime,
 }
 
 #[derive(Debug, Serialize)]
@@ -382,7 +362,6 @@ mod tests {
             created_at: day(),
             likes_count: 3,
             liked_by_me: true,
-            kind: "POST",
         };
         let v = serde_json::to_value(p).unwrap();
         let m = v.as_object().unwrap();

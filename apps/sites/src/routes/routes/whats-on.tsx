@@ -43,7 +43,7 @@ function applyFilter(events: Event[], filter: FilterId, now: Date): Event[] {
   const dayMs = 86_400_000;
   return events.filter((e) => {
     if (filter === "recurring") return e.recurrent === true;
-    const iso = effectiveStartAt(e, now);
+    const iso = effectiveStartAt(e);
     if (!iso) return false;
     const t = new Date(iso).getTime();
     if (Number.isNaN(t)) return false;
@@ -82,8 +82,8 @@ export async function loader({ request }: Route.LoaderArgs) {
   const now = new Date();
 
   const sorted = [...active].sort((a, b) => {
-    const ta = new Date(effectiveStartAt(a, now) ?? 8.64e15).getTime();
-    const tb = new Date(effectiveStartAt(b, now) ?? 8.64e15).getTime();
+    const ta = new Date(effectiveStartAt(a) ?? 8.64e15).getTime();
+    const tb = new Date(effectiveStartAt(b) ?? 8.64e15).getTime();
     return ta - tb;
   });
   const upcoming = applyFilter(sorted, filter, now).slice(0, UPCOMING_LIMIT);

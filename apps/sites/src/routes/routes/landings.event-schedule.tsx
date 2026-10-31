@@ -59,8 +59,8 @@ export async function loader({ request }: Route.LoaderArgs) {
   const now = new Date();
   const sortedActive = [...activeEvents].sort(
     (a, b) =>
-      new Date(effectiveStartAt(a, now) ?? 8.64e15).getTime() -
-      new Date(effectiveStartAt(b, now) ?? 8.64e15).getTime(),
+      new Date(effectiveStartAt(a) ?? 8.64e15).getTime() -
+      new Date(effectiveStartAt(b) ?? 8.64e15).getTime(),
   );
   const liveNow: LiveNowCard[] = liveEvents.map(toLiveNowCard);
   const { allDays, dayLabels } = groupEventsByDay(

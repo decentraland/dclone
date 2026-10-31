@@ -584,6 +584,24 @@ async fn a_community_place_is_its_destination_when_the_id_names_one_exactly() {
     .unwrap();
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].id, places.upper.to_string());
+    // as `POST /api/destinations` answers an array body: no ids, no rows;
+    // more than the batch cap, 400
+    let none = crate::explore::places::destinations::destinations_by_ids(explore, Vec::new())
+        .await
+        .unwrap();
+    assert!(none.is_empty());
+    let too_many = crate::explore::places::destinations::destinations_by_ids(
+        explore,
+        vec![places.upper.to_string(); crate::explore::places::destinations::MAX_BATCH_ITEMS + 1],
+    )
+    .await;
+    assert!(
+        matches!(
+            too_many,
+            Err(crate::shared::errors::ApiError::Http { status: 400, .. })
+        ),
+        "{too_many:?}"
+    );
 
     places.clear(&rig).await;
     rig.finish();

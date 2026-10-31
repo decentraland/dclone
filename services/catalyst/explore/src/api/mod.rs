@@ -239,12 +239,7 @@ impl Settings {
                 config.explore.explorer_map_min_refresh_secs.max(1),
             ),
             version: env!("CARGO_PKG_VERSION").to_string(),
-            commit_hash: config
-                .node
-                .commit_hash
-                .clone()
-                .or_else(|| option_env!("CATALYST_COMMIT_HASH").map(str::to_string))
-                .unwrap_or_default(),
+            commit_hash: config.commit_hash().unwrap_or_default(),
             allow_private_sources: false,
             own_hosts: crate::content::own_hosts(config),
             mirrors_enabled: config.explore.explorer_mirrors_enabled,

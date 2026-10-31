@@ -9,6 +9,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use alloy::signers::local::PrivateKeySigner;
 use futures::{SinkExt, StreamExt};
 use prost::Message;
 use sqlx::PgPool;
@@ -23,7 +24,7 @@ use super::drpc::client::{RpcClient, RpcClientModule, ServiceClient};
 use super::drpc::service_module_definition::ProcedureContext;
 use super::drpc::stream_protocol::Generator;
 use super::drpc::transport::{Transport, TransportError, TransportMessage};
-use super::handshake::test_support::{EPHEMERAL_KEY, ROOT_KEY, frame, frame_for};
+use super::handshake::test_support::{EPHEMERAL_KEY, ROOT_KEY, frame, frame_for, frame_signed};
 use super::profiles::Profiles;
 use super::proto::v2::*;
 use super::pubsub::SocialEvent;
@@ -1563,13 +1564,34 @@ async fn explorer(
     server: &Server,
     root_key: &str,
 ) -> (String, RpcClient<TungsteniteTransport>, SocialClient) {
-    let mut socket = connect(server, "/social-rpc").await;
     let (signer, frame) = frame_for(
         root_key,
         "/social-rpc",
         chrono::Utc::now().timestamp_millis(),
     )
     .await;
+    signed_in(server, signer, frame).await
+}
+
+/// [`explorer`] as a wallet the caller holds, with an ephemeral key made for
+/// the call, so no key is written out as text.
+async fn explorer_as(
+    server: &Server,
+    root: &PrivateKeySigner,
+) -> (String, RpcClient<TungsteniteTransport>, SocialClient) {
+    let ts = chrono::Utc::now().timestamp_millis();
+    let payload =
+        crate::shared::signed_fetch::build_payload_v6("get", "/social-rpc", &ts.to_string(), "{}");
+    let (signer, frame) = frame_signed(root, &PrivateKeySigner::random(), ts, &payload, "{}").await;
+    signed_in(server, signer, frame).await
+}
+
+async fn signed_in(
+    server: &Server,
+    signer: String,
+    frame: String,
+) -> (String, RpcClient<TungsteniteTransport>, SocialClient) {
+    let mut socket = connect(server, "/social-rpc").await;
     socket.send(WsMessage::Text(frame.into())).await.unwrap();
     let mut client = RpcClient::new(TungsteniteTransport::new(socket))
         .await

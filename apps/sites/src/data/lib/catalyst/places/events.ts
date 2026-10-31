@@ -28,6 +28,8 @@ export type Event = {
   start_at: string | null;
   finish_at: string | null;
   next_start_at: string | null;
+  next_finish_at?: string | null;
+  duration?: number | null;
   all_day: boolean;
   x: number | null;
   y: number | null;
@@ -227,10 +229,8 @@ type UpcomingCard = {
   jumpUrl?: string;
 };
 
-export function effectiveStartAt(e: Event, now = new Date()): string | null {
-  const start = e.start_at ? new Date(e.start_at) : null;
-  if (start && !Number.isNaN(start.getTime()) && start >= now) return e.start_at;
-  return e.next_start_at ?? e.start_at;
+export function effectiveStartAt(e: Event): string | null {
+  return eventOccurrence(e).start ?? null;
 }
 
 export function eventJumpUrl(e: Event): string | null {
@@ -328,7 +328,7 @@ export function groupEventsByDay(
   const dayStart = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
   const allDays: DayEvent[][] = Array.from({ length: days }, () => []);
   for (const e of events) {
-    const iso = effectiveStartAt(e, now);
+    const iso = effectiveStartAt(e);
     if (!iso) continue;
     const t = new Date(iso).getTime();
     if (Number.isNaN(t)) continue;
@@ -361,4 +361,16 @@ export function groupEventsByDay(
       .toUpperCase();
   });
   return { allDays, dayLabels };
+}
+
+/** Public cards, detail pages and calendar exports refer to the same next occurrence. */
+export function eventOccurrence(event: Pick<Event, "start_at" | "next_start_at" | "finish_at" | "next_finish_at" | "duration" | "recurrent">): { start: string | undefined; finish: string | undefined } {
+  const start = event.next_start_at ?? event.start_at ?? undefined;
+  const duration = event.duration ?? (!event.recurrent && event.finish_at && event.start_at
+    ? Date.parse(event.finish_at) - Date.parse(event.start_at)
+    : undefined);
+  const finish = event.next_finish_at ?? (start && Number.isFinite(Date.parse(start)) && duration !== undefined && Number.isFinite(duration) && duration >= 0
+    ? new Date(Date.parse(start) + duration).toISOString()
+    : undefined);
+  return { start, finish };
 }

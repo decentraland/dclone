@@ -11,6 +11,7 @@ pub mod mirror;
 pub mod moderation;
 pub mod posters;
 pub mod profiles;
+mod recurrence;
 pub mod schedules;
 pub mod sitemap;
 pub mod v1;
@@ -184,6 +185,9 @@ pub struct EventListFilters {
     pub positions: Vec<(i32, i32)>,
     pub estate_id: Option<String>,
     pub community_id: Option<String>,
+    pub schedule: Option<String>,
+    /// Lists include at most 100 active/future dates, or 1000 when requested.
+    pub with_recurrent_dates: bool,
     pub places_ids: Vec<String>,
     pub destination_ids: Vec<String>,
     pub from: Option<DateTime<Utc>>,
@@ -323,6 +327,10 @@ impl EventsComponent {
         if let Some(eid) = &f.estate_id {
             let p = next_placeholder(binds, EventBind::Text(eid.clone()));
             sql.push_str(&format!(" AND raw->>'estate_id' = {p}"));
+        }
+        if let Some(schedule) = &f.schedule {
+            let p = next_placeholder(binds, EventBind::Text(schedule.clone()));
+            sql.push_str(&format!(" AND raw->'schedules' ? {p}"));
         }
         if f.highlighted == Some(true) {
             sql.push_str(" AND highlighted IS TRUE");
@@ -524,8 +532,9 @@ impl EventsComponent {
 
     pub async fn moderation_pending(&self, limit: i64) -> Result<Vec<EventRecord>, ApiError> {
         let limit = limit.clamp(0, 500);
+        let columns = list_event_columns(false);
         let rows = sqlx::query_as::<_, EventRow>(sqlx::AssertSqlSafe(format!(
-            "SELECT {EVENT_COLUMNS} FROM explore.event \
+            "SELECT {columns} FROM explore.event \
              WHERE approved IS NOT TRUE \
                 OR COALESCE((raw->>'rejected')::boolean, false) IS TRUE \
              ORDER BY next_start_at DESC NULLS LAST, id ASC \
@@ -671,6 +680,21 @@ const EVENT_COLUMNS: &str = "id, name, start_at, finish_at, duration_ms, recurre
       WHERE la.event_id = event.id AND la.action = 'going' \
         AND NOT (COALESCE(event.raw->'latest_attendees', '[]') ? la.signer)) AS local_attendees";
 
+// Keep a bounded active/future date window for existing list consumers.
+// Effective next_start_at still uses the complete series, before projection.
+fn list_event_columns(include_dates: bool) -> String {
+    let date_limit = if include_dates { 1000 } else { 100 };
+    let dates = format!(
+        "COALESCE((SELECT jsonb_agg(upcoming.starts_at ORDER BY upcoming.starts_at) \
+         FROM (SELECT d.starts_at FROM ({VALID_RECURRENCE_DATES_SQL}) d \
+           WHERE d.starts_at + COALESCE(duration_ms,0) * interval '1 millisecond' > now() \
+           ORDER BY d.starts_at LIMIT {date_limit}) upcoming),'[]'::jsonb)"
+    );
+    EVENT_COLUMNS.replace(", raw,", &format!(
+        ", ((raw - 'recurrent_dates') || jsonb_build_object('next_start_at', ({EFF_NEXT_START_SQL})::timestamptz, 'recurrent_dates', {dates})) AS raw,"
+    ))
+}
+
 const NOT_DELETED_SQL: &str = " AND (raw->>'deleted_by_user') IS DISTINCT FROM 'true' \
      AND (raw->>'deleted_by_admin') IS DISTINCT FROM 'true'";
 
@@ -684,17 +708,29 @@ const DELETED_ONLY_SQL: &str = " AND ((raw->>'deleted_by_user') = 'true' \
 /// finished, else the last recurrence, else the snapshot columns. `now()` and
 /// the recurrence strings are timestamptz, so the snapshot columns (UTC
 /// timestamps) join them under the pool's UTC session.
+macro_rules! valid_recurrence_dates_sql {
+    () => {
+        "SELECT parsed.starts_at FROM ( \
+           SELECT CASE WHEN pg_input_is_valid(value,'timestamp with time zone') \
+             THEN value::timestamptz END AS starts_at \
+           FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(raw->'recurrent_dates')='array' \
+             THEN raw->'recurrent_dates' ELSE '[]'::jsonb END) \
+         ) parsed WHERE parsed.starts_at IS NOT NULL AND isfinite(parsed.starts_at)"
+    };
+}
+const VALID_RECURRENCE_DATES_SQL: &str = valid_recurrence_dates_sql!();
+
 macro_rules! eff_next_start_sql {
     () => {
-        "CASE WHEN next_start_at + COALESCE(duration_ms, 0) * interval '1 millisecond' > now() \
-             THEN next_start_at \
-         ELSE COALESCE((SELECT min((d.value #>> '{}')::timestamptz) \
-                 FROM jsonb_array_elements(COALESCE(raw->'recurrent_dates', '[]'::jsonb)) d \
-                 WHERE (d.value #>> '{}')::timestamptz \
-                     + COALESCE(duration_ms, 0) * interval '1 millisecond' > now()), \
-             (SELECT max((d.value #>> '{}')::timestamptz) \
-                 FROM jsonb_array_elements(COALESCE(raw->'recurrent_dates', '[]'::jsonb)) d), \
-             next_start_at, start_at) END"
+        concat!(
+            "CASE WHEN next_start_at + COALESCE(duration_ms, 0) * interval '1 millisecond' > now() \
+             THEN next_start_at ELSE COALESCE((SELECT min(d.starts_at) FROM (",
+            valid_recurrence_dates_sql!(),
+            ") d WHERE d.starts_at + COALESCE(duration_ms, 0) * interval '1 millisecond' > now()), \
+             (SELECT max(d.starts_at) FROM (",
+            valid_recurrence_dates_sql!(),
+            ") d), next_start_at, start_at) END"
+        )
     };
 }
 
@@ -717,8 +753,9 @@ fn next_start_order_by(order: SortOrder) -> String {
 }
 
 fn attending_sql() -> String {
+    let columns = list_event_columns(false);
     format!(
-        "SELECT {EVENT_COLUMNS} FROM explore.event \
+        "SELECT {columns} FROM explore.event \
          WHERE {EFF_NEXT_FINISH_SQL} > now() \
            AND COALESCE((raw->>'rejected')::boolean, false) IS FALSE \
            AND (raw->>'deleted_by_user') IS DISTINCT FROM 'true' \
@@ -796,10 +833,14 @@ fn build_list_sql(f: &EventListFilters, with_total: bool, binds: &mut Vec<EventB
     } else {
         next_start_order_by(f.order)
     };
-    let lim_p = next_placeholder(binds, EventBind::Int64(f.limit.max(0)));
+    let columns = list_event_columns(f.with_recurrent_dates);
+    let limit = f
+        .limit
+        .clamp(0, if f.with_recurrent_dates { 25 } else { 500 });
+    let lim_p = next_placeholder(binds, EventBind::Int64(limit));
     let off_p = next_placeholder(binds, EventBind::Int64(f.offset.max(0)));
     format!(
-        "SELECT {EVENT_COLUMNS}{extra}{viewer} FROM explore.event{where_sql}{order_clause} LIMIT {lim_p} OFFSET {off_p}"
+        "SELECT {columns}{extra}{viewer} FROM explore.event{where_sql}{order_clause} LIMIT {lim_p} OFFSET {off_p}"
     )
 }
 
@@ -1042,6 +1083,45 @@ fn parse_dt(v: Option<&Value>) -> Option<DateTime<Utc>> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn event_connected_users_uses_shared_rooms_and_deduplicates_locations() {
+        struct Participants(std::sync::Mutex<Vec<(bool, String)>>);
+        impl crate::places::live::Participants for Participants {
+            fn participants<'a>(
+                &'a self,
+                world: bool,
+                key: &'a str,
+            ) -> futures::future::BoxFuture<'a, Option<Vec<String>>> {
+                Box::pin(async move {
+                    self.0.lock().unwrap().push((world, key.into()));
+                    Some(vec![if world { "0xworld" } else { "0xparcel" }.into()])
+                })
+            }
+        }
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/unused")
+            .unwrap();
+        let live = std::sync::Arc::new(crate::places::live::Live::new(pool));
+        let participants = std::sync::Arc::new(Participants(Default::default()));
+        live.set_participants(participants.clone());
+        let mut events = vec![
+            event_row_to_record(row_with(json!({"x":10,"y":20}), None, None), None, None),
+            event_row_to_record(row_with(json!({"x":10,"y":20}), None, None), None, None),
+            event_row_to_record(
+                row_with(json!({"world":true,"server":"MyWorld.DCL.eth"}), None, None),
+                None,
+                None,
+            ),
+        ];
+        super::handlers::fill_connected(&mut events, &live).await;
+        assert_eq!(events[0].connected_addresses, Some(vec!["0xparcel".into()]));
+        assert_eq!(events[1].connected_addresses, events[0].connected_addresses);
+        assert_eq!(events[2].connected_addresses, Some(vec!["0xworld".into()]));
+        let calls = participants.0.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert!(calls.contains(&(true, "myworld.dcl.eth".into())));
+    }
 
     const DELETED_USER_CLAUSE: &str = "(raw->>'deleted_by_user') IS DISTINCT FROM 'true'";
     const DELETED_ADMIN_CLAUSE: &str = "(raw->>'deleted_by_admin') IS DISTINCT FROM 'true'";
@@ -1379,9 +1459,10 @@ mod tests {
         assert_eq!(
             sql_t,
             sql_f.replacen(
-                &format!("SELECT {EVENT_COLUMNS} FROM explore.event"),
+                &format!("SELECT {} FROM explore.event", list_event_columns(false)),
                 &format!(
-                    "SELECT {EVENT_COLUMNS}, count(*) OVER() AS total_count FROM explore.event"
+                    "SELECT {}, count(*) OVER() AS total_count FROM explore.event",
+                    list_event_columns(false)
                 ),
                 1,
             )
@@ -1501,6 +1582,38 @@ mod tests {
         };
         let mut binds = Vec::new();
         assert!(EventsComponent::build_where(&f, &mut binds).contains(" AND FALSE"));
+    }
+
+    #[test]
+    fn lists_with_explicit_occurrence_payloads_have_a_smaller_page_limit() {
+        let filters = EventListFilters {
+            limit: 500,
+            with_recurrent_dates: true,
+            ..Default::default()
+        };
+        let mut binds = Vec::new();
+        let sql = build_list_sql(&filters, false, &mut binds);
+        assert!(sql.contains("LIMIT 1000"));
+        assert!(matches!(
+            binds.get(binds.len() - 2),
+            Some(EventBind::Int64(25))
+        ));
+    }
+
+    #[test]
+    fn ordinary_lists_keep_requested_event_limits_with_a_hundred_date_window() {
+        for limit in [100, 500] {
+            let filters = EventListFilters {
+                limit,
+                ..Default::default()
+            };
+            let mut binds = Vec::new();
+            let sql = build_list_sql(&filters, false, &mut binds);
+            assert!(sql.contains("LIMIT 100"));
+            assert!(
+                matches!(binds.get(binds.len()-2),Some(EventBind::Int64(value)) if *value==limit)
+            );
+        }
     }
 
     #[test]

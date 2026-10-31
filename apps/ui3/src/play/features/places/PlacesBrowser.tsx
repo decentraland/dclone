@@ -8,7 +8,7 @@
 // PlacesPage and the post-jump-in PlacesPicker; the host supplies an `onPick(place)` action.
 
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { BrowseControl, BrowseLoading, BrowsePanel, BrowseToolbar, DiscoverGrid, Dropdown, EmptyState, Heart, Pin, SearchField, Tabs, type TabItem } from '../../design'
+import { BrowseControl, BrowseLoading, BrowsePanel, BrowseToolbar, Button, DiscoverGrid, Dropdown, EmptyState, Heart, Pin, SearchField, Tabs, type TabItem } from '../../design'
 import { PlaceCard } from './PlaceCard'
 import { FeaturedCarousel } from './FeaturedCarousel'
 import { usePlaces, type PlacesSection, type PlacesSort } from './usePlaces'
@@ -52,14 +52,16 @@ function CompassGlyph(): React.JSX.Element {
 }
 
 export function PlacesBrowser({
+  account,
   headExtra,
   onPick
 }: {
+  account?: string | null
   /** Slot rendered at the far right of the toolbar (e.g. the picker's "Skip" button). */
   headExtra?: React.ReactNode
   onPick: (place: DiscoverPlace) => void
 }): React.JSX.Element {
-  const { places: list, liveFeed, featured: featuredFeed, loading, error, search, setSearch, category, setCategory, sort, setSort, section, setSection } = usePlaces()
+  const { places: list, liveFeed, featured: featuredFeed, loading, loadingMore, hasMore, loadMore, retry, error, search, setSearch, category, setCategory, sort, setSort, section, setSection } = usePlaces(account)
   // Local input value, debounced into the hook's `search` so we don't refetch on every keystroke.
   const [draft, setDraft] = useState(search)
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -133,21 +135,21 @@ export function PlacesBrowser({
         <BrowseControl size="select">
           <Dropdown options={CATEGORY_OPTIONS} value={categoryLabel(category)} onChange={(label) => setCategory(categoryId(label))} />
         </BrowseControl>
-        <BrowseControl size="select">
+        {section === 'all' && <BrowseControl size="select">
           <Dropdown
             options={SORT_OPTIONS.map((o) => o.label)}
             value={SORT_OPTIONS.find((o) => o.value === sort)?.label ?? 'Most active'}
             onChange={(label) => setSort(SORT_OPTIONS.find((o) => o.label === label)?.value ?? 'most_active')}
           />
-        </BrowseControl>
+        </BrowseControl>}
         {headExtra}
       </BrowseToolbar>
 
       <BrowsePanel>
         {loading ? (
           <BrowseLoading />
-        ) : error ? (
-          <EmptyState variant="inline" tone="error" title="Couldn't load places" subtitle={error} />
+        ) : error && list.length === 0 ? (
+          <EmptyState variant="inline" tone="error" title="Couldn't load places" subtitle={error} actions={[{ label: 'Retry', onClick: retry }]} />
         ) : mainList.length === 0 ? (
           <EmptyState
             variant="inline"
@@ -163,6 +165,14 @@ export function PlacesBrowser({
           />
         ) : (
           renderGrid(mainList)
+        )}
+        {error && list.length > 0 && (
+          <EmptyState variant="inline" tone="error" title="Couldn't load more places" subtitle={error} actions={[{ label: 'Retry', onClick: retry }]} />
+        )}
+        {!loading && !error && hasMore && (
+          <Button variant="secondary" disabled={loadingMore} onClick={loadMore}>
+            {loadingMore ? 'Loading more…' : 'Load more places'}
+          </Button>
         )}
       </BrowsePanel>
     </>

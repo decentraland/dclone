@@ -464,6 +464,13 @@ impl Config {
         }
     }
 
+    /// The commit `/about` and the `/status` routes report: `COMMIT_HASH` when
+    /// set and not blank, else the build's `CATALYST_COMMIT_HASH`.
+    pub fn commit_hash(&self) -> Option<String> {
+        Self::non_empty(&self.node.commit_hash)
+            .or_else(|| option_env!("CATALYST_COMMIT_HASH").map(str::to_string))
+    }
+
     /// An optional secret or token as the old binaries read them: blank is unset.
     pub fn non_empty(value: &Option<String>) -> Option<String> {
         value

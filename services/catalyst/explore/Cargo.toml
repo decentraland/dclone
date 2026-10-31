@@ -40,6 +40,7 @@ reqwest.workspace = true
 flate2.workspace = true
 url.workspace = true
 regex.workspace = true
+rrule.workspace = true
 tiny-skia.workspace = true
 rand.workspace = true
 alloy-signer.workspace = true

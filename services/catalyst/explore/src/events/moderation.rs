@@ -28,7 +28,7 @@
 use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 
 use crate::shared::errors::ApiError;
 
@@ -65,10 +65,12 @@ fn set_approved(raw: &mut Map<String, Value>, actor: &str) {
 }
 
 fn set_rejected(raw: &mut Map<String, Value>, actor: &str, reason: Option<String>) {
+    if !flag(raw, "rejected") {
+        raw.insert("rejected_by".into(), json!(actor));
+    }
     raw.insert("approved".into(), json!(false));
     raw.insert("approved_by".into(), Value::Null);
     raw.insert("rejected".into(), json!(true));
-    raw.insert("rejected_by".into(), json!(actor));
     raw.insert(
         "rejection_reason".into(),
         reason.map(Value::from).unwrap_or(Value::Null),
@@ -364,8 +366,8 @@ impl Decision {
 /// An operator's delete of a mirrored event: `raw` (the soft-delete keys
 /// set) projected onto the row and `hidden` recorded, which keeps it from
 /// every public read across passes; the console still sees it.
-pub async fn hide_mirrored(
-    pool: &PgPool,
+pub(super) async fn hide_mirrored_locked(
+    tx: &mut Transaction<'_, Postgres>,
     event_id: &str,
     raw: Map<String, Value>,
     actor: &str,
@@ -376,14 +378,12 @@ pub async fn hide_mirrored(
         deleted_reason: text(&raw, "deleted_reason"),
         ..Default::default()
     };
-    let mut tx = pool.begin().await?;
     sqlx::query("UPDATE explore.event SET raw = $2 WHERE id = $1")
         .bind(event_id)
         .bind(Value::Object(raw))
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
-    decision.record(&mut tx, event_id, actor).await?;
-    tx.commit().await?;
+    decision.record(tx, event_id, actor).await?;
     tracing::info!(event = %event_id, actor, "mirrored event hidden");
     Ok(())
 }
@@ -679,8 +679,8 @@ pub fn build_create_raw(
             doc.extend(m);
         }
     }
-    let doc = Value::Object(doc);
-    Ok(doc)
+    super::recurrence::recompute(&mut doc, now)?;
+    Ok(Value::Object(doc))
 }
 
 /// The old `generate_id`: a uuid-shaped sha256 of the name and the instant.
@@ -704,20 +704,23 @@ pub(crate) fn generate_id(seed: &str) -> String {
 /// `server` (the world's name, lowercased, when the catalogue knows it); a
 /// parcel event takes the enabled place whose positions hold the parcel
 /// (`place_positions_path_gin`), the newest deployment first.
-pub(crate) async fn resolve_location(
-    pool: &PgPool,
+pub(crate) async fn resolve_location<'e, E>(
+    executor: E,
     world: bool,
     server: Option<&str>,
     x: i32,
     y: i32,
-) -> Result<(Option<String>, bool), ApiError> {
+) -> Result<(Option<String>, bool), ApiError>
+where
+    E: sqlx::PgExecutor<'e>,
+{
     match server.filter(|s| world && !s.is_empty()) {
         Some(name) => {
             let found: Option<(String,)> = sqlx::query_as(
                 "SELECT lower(world_name) FROM explore.place_indexed WHERE world IS TRUE AND lower(world_name) = lower($1) LIMIT 1",
             )
             .bind(name)
-            .fetch_optional(pool)
+            .fetch_optional(executor)
             .await?;
             Ok((found.map(|(n,)| n), true))
         }
@@ -727,11 +730,87 @@ pub(crate) async fn resolve_location(
                  ORDER BY deployed_at DESC NULLS LAST, id LIMIT 1",
             )
             .bind(json!([format!("{x},{y}")]))
-            .fetch_optional(pool)
+            .fetch_optional(executor)
             .await?;
             Ok((found.map(|(id,)| id), false))
         }
     }
+}
+
+/// A community event may only be linked by an owner or moderator of that
+/// active community. This uses the shared membership authority, not a claim
+/// supplied by the event form.
+pub(super) async fn validate_community<'e, E>(
+    executor: E,
+    id: &str,
+    signer: &str,
+) -> Result<(), ApiError>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    let id =
+        uuid::Uuid::parse_str(id).map_err(|_| ApiError::bad_request("invalid community_id"))?;
+    let managed: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM social.communities c \
+         LEFT JOIN social.community_members m ON m.community_id = c.id AND m.member_address = $2 \
+         WHERE c.id = $1 AND c.active AND NOT c.suspended \
+           AND (c.owner_address = $2 OR m.role IN ('owner', 'moderator')))",
+    )
+    .bind(id)
+    .bind(signer.to_ascii_lowercase())
+    .fetch_one(executor)
+    .await?;
+    if !managed {
+        return Err(ApiError::forbidden(
+            "You don't have permission to link this community",
+        ));
+    }
+    Ok(())
+}
+
+/// Validate catalogue references before committing an event. Arrays are
+/// bounded at the boundary, and the schedule check is one set query.
+pub(super) async fn validate_references<'e, E>(
+    executor: E,
+    raw: &Map<String, Value>,
+) -> Result<(), ApiError>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    if let Some(categories) = raw.get("categories").and_then(Value::as_array) {
+        let known = super::categories::list();
+        if categories.len() > 25
+            || categories.iter().any(|category| {
+                !known
+                    .iter()
+                    .any(|known| category.as_str() == Some(&known.name))
+            })
+        {
+            return Err(ApiError::bad_request("Invalid category tag supplied"));
+        }
+    }
+    if let Some(schedules) = raw.get("schedules").and_then(Value::as_array) {
+        if schedules.len() > 100 {
+            return Err(ApiError::bad_request("too many schedules"));
+        }
+        let schedules: Vec<String> = schedules
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect();
+        if !schedules.is_empty() {
+            let count: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM explore.schedules_local WHERE id = ANY($1)",
+            )
+            .bind(&schedules)
+            .fetch_one(executor)
+            .await?;
+            if count != schedules.len() as i64 {
+                return Err(ApiError::bad_request("Schedule not found"));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Creates the event as the old admin path did, the operator as the
@@ -762,6 +841,14 @@ pub async fn create_as(
     let id = generate_id(&body.name);
     let mut doc = build_create_raw(body, creator, start_at, place_id.as_deref(), world, now)?;
     doc["id"] = json!(id);
+    if creator != ADMIN_CREATOR {
+        if let Some(community) = body.community_id.as_deref() {
+            validate_community(pool, community, creator).await?;
+        }
+    }
+    if let Some(raw) = doc.as_object() {
+        validate_references(pool, raw).await?;
+    }
     let f = super::mirror::extract_fields(&doc)
         .ok_or_else(|| ApiError::internal("event document without an id"))?;
     let mut tx = pool.begin().await?;
@@ -807,8 +894,8 @@ pub async fn create_as(
 /// Writes `raw` as the event's document and its projected columns, with
 /// `signer`'s overlay (`payload` as received), in one transaction: an edit,
 /// a delete or a moderation of a stored event.
-pub async fn store(
-    pool: &PgPool,
+pub(super) async fn store_locked(
+    tx: &mut Transaction<'_, Postgres>,
     event_id: &str,
     raw: Map<String, Value>,
     signer: &str,
@@ -818,7 +905,6 @@ pub async fn store(
     doc["id"] = json!(event_id);
     let f = super::mirror::extract_fields(&doc)
         .ok_or_else(|| ApiError::internal("event document without an id"))?;
-    let mut tx = pool.begin().await?;
     sqlx::query(
         "UPDATE explore.event SET name = $2, start_at = $3::timestamptz AT TIME ZONE 'UTC', finish_at = $4::timestamptz AT TIME ZONE 'UTC',
              next_start_at = $5::timestamptz AT TIME ZONE 'UTC', next_finish_at = $6::timestamptz AT TIME ZONE 'UTC', duration_ms = $7,
@@ -843,7 +929,7 @@ pub async fn store(
     .bind(f.y)
     .bind(f.description)
     .bind(&doc)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
     sqlx::query(
         "INSERT INTO explore.events_local (id, signer, signed_payload) VALUES ($1, $2, $3) \
@@ -853,9 +939,8 @@ pub async fn store(
     .bind(event_id)
     .bind(signer)
     .bind(payload)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
-    tx.commit().await?;
     Ok(())
 }
 

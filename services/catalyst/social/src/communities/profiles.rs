@@ -17,42 +17,77 @@ use sqlx::PgPool;
 
 use crate::shared::cache::{TtlCache, cache_get, cache_put};
 
-/// A profile's `nameColor` as production writes it: upstream passes the
-/// object through (`src/logic/profiles.ts` at `fb3dcb8`) and `JSON.stringify`
-/// writes each number in JavaScript's form (`1` for a stored `1.0`,
-/// `0.6801473` as stored, see [`js_number`]); `a` comes along when the
-/// profile has one (capture `social/community-members`).
-#[derive(Debug, Clone, Serialize, PartialEq)]
+/// A profile's `nameColor` as production writes it: upstream passes any
+/// truthy value through as stored (`src/logic/profiles.ts` at `fb3dcb8`,
+/// `...(nameColor && { nameColor })`), and `JSON.stringify` writes each number
+/// in JavaScript's form (`1` for a stored `1.0`, `0.6801473` as stored, see
+/// [`js_number`]); the usual shape is `{r, g, b}` with `a` when the profile has
+/// one (capture `social/community-members`). The type names that usual shape;
+/// a stored value of any other truthy shape is passed through unchanged.
+#[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(
     feature = "ts",
     derive(ts_rs::TS),
     ts(export, export_to = "communities/")
 )]
-pub struct NameColor {
-    #[cfg_attr(feature = "ts", ts(type = "number"))]
-    pub r: serde_json::Number,
-    #[cfg_attr(feature = "ts", ts(type = "number"))]
-    pub g: serde_json::Number,
-    #[cfg_attr(feature = "ts", ts(type = "number"))]
-    pub b: serde_json::Number,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "ts", ts(optional, type = "number"))]
-    pub a: Option<serde_json::Number>,
-}
+pub struct NameColor(
+    #[cfg_attr(
+        feature = "ts",
+        ts(type = "{ r: number, g: number, b: number, a?: number, }")
+    )]
+    serde_json::Value,
+);
 
 impl NameColor {
-    /// `r`, `g` and `b` must be numbers; anything else reads as no colour.
+    /// The stored value when JavaScript reads it as truthy (anything but
+    /// `null`, `false`, `0` and `""`), its numbers in `JSON.stringify`'s form.
     pub fn from_profile(value: &serde_json::Value) -> Option<Self> {
-        let number = |key: &str| match value.get(key) {
-            Some(serde_json::Value::Number(n)) => Some(js_number(n)),
-            _ => None,
+        use serde_json::Value;
+        let truthy = match value {
+            Value::Null => false,
+            Value::Bool(b) => *b,
+            Value::Number(n) => n.as_f64() != Some(0.0),
+            Value::String(s) => !s.is_empty(),
+            Value::Array(_) | Value::Object(_) => true,
         };
-        Some(Self {
-            r: number("r")?,
-            g: number("g")?,
-            b: number("b")?,
-            a: number("a"),
-        })
+        truthy.then(|| Self(js_numbers(value)))
+    }
+}
+
+/// An object writes `r`, `g`, `b` and `a` first, in the order a profile
+/// stores them, then any other key; any other value as it is.
+impl Serialize for NameColor {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let serde_json::Value::Object(map) = &self.0 else {
+            return self.0.serialize(serializer);
+        };
+        const FIRST: [&str; 4] = ["r", "g", "b", "a"];
+        let mut out = serializer.serialize_map(Some(map.len()))?;
+        for key in FIRST {
+            if let Some(v) = map.get(key) {
+                out.serialize_entry(key, v)?;
+            }
+        }
+        for (k, v) in map.iter().filter(|(k, _)| !FIRST.contains(&k.as_str())) {
+            out.serialize_entry(k, v)?;
+        }
+        out.end()
+    }
+}
+
+/// `value` with every number in [`js_number`]'s form.
+fn js_numbers(value: &serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    match value {
+        Value::Number(n) => Value::Number(js_number(n)),
+        Value::Array(items) => Value::Array(items.iter().map(js_numbers).collect()),
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(k, v)| (k.clone(), js_numbers(v)))
+                .collect(),
+        ),
+        other => other.clone(),
     }
 }
 
@@ -173,6 +208,13 @@ impl ProfilesCache {
             faces,
             cache: Arc::new(TtlCache::default()),
         }
+    }
+
+    /// Forgets every memoised profile, misses included, so a test's next
+    /// read sees only the rows it seeded since.
+    #[cfg(test)]
+    pub(crate) fn clear(&self) {
+        self.cache.lock().unwrap().clear();
     }
 
     pub async fn get_profiles(&self, addresses: &[String]) -> HashMap<String, ProfileInfo> {
@@ -402,9 +444,16 @@ mod tests {
             written(r#"{"r":0.6801472902297974,"g":-0.0,"b":0}"#),
             r#"{"r":0.6801472902297974,"g":0,"b":0}"#
         );
-        assert!(
-            NameColor::from_profile(&serde_json::json!({ "r": 1, "g": "1", "b": 1 })).is_none()
+        // any truthy value passes through as stored; a falsy one is no colour
+        assert_eq!(
+            written(r#"{"r":1,"g":"1","b":1.0,"x":[2.0]}"#),
+            r#"{"r":1,"g":"1","b":1,"x":[2]}"#
         );
+        assert_eq!(written(r#""red""#), r#""red""#);
+        for falsy in ["null", "false", "0", "0.0", r#""""#] {
+            let value: serde_json::Value = serde_json::from_str(falsy).unwrap();
+            assert!(NameColor::from_profile(&value).is_none(), "{falsy}");
+        }
     }
 
     #[test]

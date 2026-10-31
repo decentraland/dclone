@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { Link } from "react-router";
+import { Link, useNavigate } from "react-router";
 import { href } from "@/core/lib/router/routes";
 
 import EventDetail from "@ui/explorer/pages/EventDetail";
@@ -11,6 +11,7 @@ import { CatalystError } from "@/data/lib/catalyst/client";
 import {
   fetchEvent,
   eventCoords,
+  eventOccurrence,
   eventJumpUrl,
   formatEventWhen,
   type Event,
@@ -60,6 +61,8 @@ export async function loader({ request, params }: Route.LoaderArgs) {
 
 export default function EventDetailRoute({ loaderData }: Route.ComponentProps) {
   const { event, sid, unavailable } = loaderData;
+  const navigate = useNavigate();
+  const { start, finish } = event ? eventOccurrence(event) : { start: undefined, finish: undefined };
 
   const viewed = useRef(false);
   useEffect(() => {
@@ -86,19 +89,22 @@ export default function EventDetailRoute({ loaderData }: Route.ComponentProps) {
   return event ? (
     <main className="event-detail-route">
       <EventDetail
-        {...({
-          event: {
-            title: event.name ?? "Untitled event",
-            image: event.image ?? undefined,
-            when: formatEventWhen(event.start_at ?? event.next_start_at),
-            host: event.user_name ?? event.scene_name ?? "Decentraland",
-            description: event.description ?? "No description provided.",
-            schedule: formatEventWhen(event.start_at ?? event.next_start_at),
-            location: eventCoords(event) ?? "Location not published",
-          },
-          jumpHref: eventJumpUrl(event) ?? event.url ?? undefined,
-          onJumpIn,
-        } as React.ComponentProps<typeof EventDetail>)}
+        event={{
+          id: event.id,
+          start,
+          finish,
+          title: event.name ?? "Untitled event",
+          image: event.image ?? undefined,
+          when: formatEventWhen(start ?? null),
+          host: event.user_name ?? event.scene_name ?? "Decentraland",
+          description: event.description ?? "No description provided.",
+          schedule: formatEventWhen(start ?? null),
+          location: eventCoords(event) ?? "Location not published",
+        }}
+        jumpHref={eventJumpUrl(event) ?? event.url ?? undefined}
+        onJumpIn={onJumpIn}
+        onClose={() => navigate(href("/whats-on"))}
+        rsvpHref={`/landings/rsvp-event?event=${encodeURIComponent(event.id)}`}
       />
     </main>
   ) : unavailable ? (

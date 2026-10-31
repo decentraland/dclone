@@ -226,6 +226,10 @@ Optional selections are
 `key = ANY` / `player_address = ANY` filters on that prefix. Not measured:
 a scene at its quota (10 MB world plus 1 MB per player).
 
+Scene-host storage requests sign the pathname, allowing `Storage.getValues`
+listing queries. Verification still binds the method and declared storage mount;
+the unsigned-query trade-off requires security acceptance.
+
 Comms (`services/catalyst/comms`) uses the worlds/content identities and world
 permission decisions through shared queries and local calls. World permissions
 keep one authoritative representation; social keeps message/call membership

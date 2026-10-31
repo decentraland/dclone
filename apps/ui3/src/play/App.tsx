@@ -194,6 +194,10 @@ function Hud(): React.JSX.Element {
   }, [])
 
   const session = useEngineSession(createDriver)
+  // login.account is the remembered welcome-back identity. The engine's
+  // current profile identifies its player; until it arrives, discovery reads
+  // the same fresh SSO identity the login driver uses.
+  const discoveryAccount = session.profile.data?.address
   // mounted for good once wanted: `?editor`, or Create opened
   const [editorWanted, setEditorWanted] = useState(params.has('editor'))
   if (EDITOR_BUILD && EDITOR && !editorWanted && session.create.open) setEditorWanted(true)
@@ -341,7 +345,7 @@ function Hud(): React.JSX.Element {
           <LoadingAndLogin flow={session.login} />
         ))}
       {session.phase === 'welcome' && <WelcomePage setEngineViewport={session.setEngineViewport} />}
-      {session.phase === 'picking' && <PlacesPicker onPick={session.pickDestination} />}
+      {session.phase === 'picking' && <PlacesPicker account={discoveryAccount} onPick={session.pickDestination} />}
       {session.phase === 'lobby' && (
         <>
           <LobbyHome onPick={session.pickDestination} setEngineViewport={session.setEngineViewport} />
@@ -427,6 +431,7 @@ function Hud(): React.JSX.Element {
           </SurfaceBoundary>
           <SurfaceBoundary name="Places" open={session.places.open} onCrash={session.closeAllPanels}>
             <PlacesPage
+              account={discoveryAccount}
               places={session.places}
               profile={session.profile}
               onNavigate={goToMenuPage}

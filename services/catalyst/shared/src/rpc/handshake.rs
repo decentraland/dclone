@@ -72,12 +72,12 @@ fn truncate_detail(value: &str) -> String {
     }
 }
 
-/// Header names are case-insensitive on the wire; the frame carries them as
-/// JSON keys, so the lookup folds case the way a header map would.
-pub fn obj_str<'a>(obj: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
-    obj.iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case(key))
-        .and_then(|(_, v)| v.as_str())
+/// A header read under its exact lowercase name, as `verify()` in
+/// `@dcl/crypto-middleware` 6.3.0 reads the frame (`dist/verify.js:72`,
+/// `:321-322`): a re-cased key is never read, so it cannot shadow the
+/// lowercase one.
+fn obj_str<'a>(obj: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
+    obj.get(key).and_then(Value::as_str)
 }
 
 fn frame_object(frame_json: &str) -> Result<Map<String, Value>, HandshakeError> {
@@ -92,6 +92,8 @@ fn frame_object(frame_json: &str) -> Result<Map<String, Value>, HandshakeError> 
     }
 }
 
+const IDENTITY_PREFIX: &str = "x-identity-";
+
 /// Every `x-identity-*` field, in any case, must be a string or an array of
 /// strings before anything is verified (upstream's `parseAuthChainHeaders` in
 /// `ws-handler.ts`); other fields are left alone. An array reads as its first
@@ -99,7 +101,10 @@ fn frame_object(frame_json: &str) -> Result<Map<String, Value>, HandshakeError> 
 /// 6.3.0 (`dist/verify.js`) reads a repeated header.
 fn identity_headers(mut obj: Map<String, Value>) -> Result<Map<String, Value>, HandshakeError> {
     for (key, value) in obj.iter_mut() {
-        if !key.to_ascii_lowercase().starts_with("x-identity-") {
+        if !key
+            .get(..IDENTITY_PREFIX.len())
+            .is_some_and(|p| p.eq_ignore_ascii_case(IDENTITY_PREFIX))
+        {
             continue;
         }
         match value {
@@ -593,6 +598,53 @@ mod tests {
         })
         .await;
         let err = verify(&no_timestamp, "get", &root(), now_secs)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, HandshakeError::MissingHeader(_)), "{err:?}");
+
+        let empty_metadata = edited(now_secs, |obj| {
+            obj.insert("x-identity-metadata".into(), json!([]));
+        })
+        .await;
+        let got = verify(&empty_metadata, "get", &root(), now_secs)
+            .await
+            .expect("an empty metadata array reads as absent");
+        assert_eq!(got.as_str(), signer);
+    }
+
+    /// `verify()` reads the exact lowercase keys (`dist/verify.js:72`,
+    /// `:321-322`): a re-cased duplicate passes the up-front type check and is
+    /// then never read, so it cannot shadow the lowercase header, and a
+    /// re-cased header alone is absent.
+    #[tokio::test]
+    async fn a_re_cased_identity_header_is_never_read() {
+        let now_secs = 1_700_000_000;
+        let (signer, _) = super::test_support::frame("/", now_secs * 1000).await;
+        for (key, value) in [
+            ("X-Identity-Timestamp", json!([])),
+            ("X-Identity-Timestamp", json!("0")),
+            ("X-Identity-Metadata", json!([])),
+            (
+                "X-Identity-Metadata",
+                json!(r#"{"signer":"decentraland-kernel-scene"}"#),
+            ),
+            ("X-Identity-Auth-Chain-0", json!("not a link")),
+        ] {
+            let frame = edited(now_secs, |obj| {
+                obj.insert(key.to_string(), value.clone());
+            })
+            .await;
+            let got = verify(&frame, "get", &root(), now_secs)
+                .await
+                .unwrap_or_else(|e| panic!("{key} {value}: {e:?}"));
+            assert_eq!(got.as_str(), signer);
+        }
+        let re_cased = edited(now_secs, |obj| {
+            let ts = obj.remove("x-identity-timestamp").unwrap();
+            obj.insert("X-Identity-Timestamp".into(), ts);
+        })
+        .await;
+        let err = verify(&re_cased, "get", &root(), now_secs)
             .await
             .unwrap_err();
         assert!(matches!(err, HandshakeError::MissingHeader(_)), "{err:?}");

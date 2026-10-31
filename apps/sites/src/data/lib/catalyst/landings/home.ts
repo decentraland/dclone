@@ -2,7 +2,7 @@ import { z } from "zod";
 
 import { playUrl } from "../bases";
 import type { Event } from "../places/events";
-import { formatEventTime } from "../places/events";
+import { eventOccurrence, formatEventTime } from "../places/events";
 import type { Place } from "../schema";
 
 const LinkSchema = z.object({
@@ -95,7 +95,7 @@ function eventToRailItem(e: Event): EventRailItem {
     id: e.id,
     category: eventCategory(e),
     title: e.name ?? "Untitled event",
-    when: formatEventTime(e.start_at ?? e.next_start_at),
+    when: formatEventTime(eventOccurrence(e).start ?? null),
     live: e.live ?? false,
     image: e.image ?? null,
   };
@@ -112,7 +112,7 @@ const WEEKDAY_NAMES = [
 ];
 
 export function eventWeekday(e: Event): number | null {
-  const iso = e.next_start_at ?? e.start_at;
+  const iso = eventOccurrence(e).start;
   if (!iso) return null;
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return null;

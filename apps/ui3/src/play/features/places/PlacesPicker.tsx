@@ -9,7 +9,7 @@ import { placeTeleport, type DiscoverPlace } from './placesApi'
 import type { Destination } from '../session/useEngineSession'
 import styles from './PlacesPicker.module.css'
 
-export function PlacesPicker({ onPick }: { onPick: (dest: Destination) => void }): React.JSX.Element {
+export function PlacesPicker({ onPick, account }: { onPick: (dest: Destination) => void; account?: string | null }): React.JSX.Element {
   return (
     <div className={styles.root}>
       <div className={styles.scroll}>
@@ -23,7 +23,7 @@ export function PlacesPicker({ onPick }: { onPick: (dest: Destination) => void }
               Skip to Home
             </Button>
           </div>
-          <PlacesBrowser onPick={(place: DiscoverPlace) => onPick(placeTeleport(place))} />
+          <PlacesBrowser account={account} onPick={(place: DiscoverPlace) => onPick(placeTeleport(place))} />
         </div>
       </div>
     </div>

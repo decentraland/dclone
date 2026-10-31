@@ -234,9 +234,9 @@ bearer-token and moderator routes beyond their error shape (`POST
 `social-rpc/_socket/reads.json`; `GET /users/{userAddress}/community-voice-chat-status`
 (same 401 shape as the captured voice-chat-status).
 
-## Replay of social-api and social-rpc (2026-10-28 01:13 UTC)
+## Replay of social-api and social-rpc (2026-10-29 04:17 UTC)
 
-`tests/conformance.rs` against revision `aa323715` with the communities
+`tests/conformance.rs` against revision `fa8f9acc` with the communities
 mirror on production and `COMMUNITIES_ADMIN_TOKEN` set (setup and every row:
 `tests/conformance/REPORT.md`, "Node setup" and "social"): social-api 32 of
 53 identical and 21 different, none genuine (`communities-list-only-voice-chat`
@@ -248,6 +248,14 @@ and place lists of the captured community, which the mirror does not copy, are
 compared in process against seeded rows
 (`social/src/communities/tests/fixture_shapes.rs`, where only the recorded
 extension keys still differ).
+
+`communities-list-limit-zero` cannot show a page count: `data.pages` and
+`data.total` are volatile for the listing fixtures. The 2026-09-25 replay
+against a Catalyst node recorded `pages` 0 vs 2 for it (limit 0 then paged by
+zero). `limit=0` now falls back to the default 100, as the capture answers
+(`limit` 100, `pages` 2): `social/src/communities/http.rs`, tests
+`offset_is_capped_and_ordinary_values_pass_through` (the limit) and
+`paginated_page_is_one_based` (the page count).
 
 ## Replay of the other services (2026-09-25 19:31-19:40 UTC)
 

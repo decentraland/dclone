@@ -2252,11 +2252,6 @@ async fn an_unlisted_room_is_listed_only_for_members() {
     let (owner, member, viewer) = (wallet(), wallet(), wallet());
     let c = rig.community(&owner, false).await;
     rig.member(c, &member, "member").await;
-    sqlx::query("UPDATE social.communities SET unlisted = true WHERE id = $1")
-        .bind(c)
-        .execute(&rig.pool)
-        .await
-        .unwrap();
     rig.voice(c, &owner, "connected", true).await;
     let listed = |v: &serde_json::Value| {
         v["data"]["activeChats"]
@@ -2265,6 +2260,20 @@ async fn an_unlisted_room_is_listed_only_for_members() {
             .iter()
             .any(|x| x["communityId"] == c.to_string())
     };
+    // Control: while the community is listed, the non-member sees the room.
+    let (_, v) = hit(
+        app,
+        Case::new("get", "/v1/community-voice-chats/active")
+            .signed(&viewer)
+            .await,
+    )
+    .await;
+    assert!(listed(&v), "{v}");
+    sqlx::query("UPDATE social.communities SET unlisted = true WHERE id = $1")
+        .bind(c)
+        .execute(&rig.pool)
+        .await
+        .unwrap();
     let (_, v) = hit(
         app,
         Case::new("get", "/v1/community-voice-chats/active")
@@ -2281,6 +2290,80 @@ async fn an_unlisted_room_is_listed_only_for_members() {
     )
     .await;
     assert!(listed(&v), "{v}");
+    rig.finish();
+}
+
+/// `GET /v1/moderation/communities` as upstream's
+/// `getAllCommunitiesForModeration` answers (`communities-db.ts` at
+/// `fb3dcb8`): active communities only, the name or description matching,
+/// upstream's row (`description`, `privacy`, the member count plus one,
+/// `createdAt` with milliseconds and `Z`), the largest first.
+#[tokio::test]
+async fn the_moderation_listing_answers_upstreams_row() {
+    let modw = wallet();
+    let Some(rig) = Rig::new(admin_settings(Some(&modw))).await else {
+        return;
+    };
+    let app = &rig.app;
+    let (owner, member) = (wallet(), wallet());
+    let tag = Uuid::new_v4().simple().to_string();
+    let small = rig.community(&owner, false).await;
+    let big = rig.community(&owner, true).await;
+    let gone = rig.community(&owner, false).await;
+    rig.member(big, &member, "member").await;
+    for (id, name) in [(small, "small"), (big, "big"), (gone, "gone")] {
+        sqlx::query("UPDATE social.communities SET description = $2, name = $3, created_at = '2026-01-02 03:04:05.678912' WHERE id = $1")
+            .bind(id)
+            .bind(format!("moderation {tag}"))
+            .bind(format!("{name} {tag}"))
+            .execute(&rig.pool)
+            .await
+            .unwrap();
+    }
+    sqlx::query("UPDATE social.communities SET active = FALSE WHERE id = $1")
+        .bind(gone)
+        .execute(&rig.pool)
+        .await
+        .unwrap();
+    let (status, v) = hit(
+        app,
+        Case::new(
+            "get",
+            format!("/v1/moderation/communities?search=moderation%20{tag}"),
+        )
+        .signed(&modw)
+        .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let rows = v["data"]["results"].as_array().unwrap();
+    assert_eq!(rows.len(), 2, "the inactive one is not listed: {v}");
+    assert_eq!(rows[0]["id"], big.to_string(), "the largest first");
+    let mut keys: Vec<&str> = rows[0]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        [
+            "active",
+            "createdAt",
+            "description",
+            "id",
+            "membersCount",
+            "name",
+            "ownerAddress",
+            "privacy"
+        ]
+    );
+    assert_eq!(rows[0]["privacy"], "private");
+    assert_eq!(rows[0]["membersCount"], 3, "owner and member, plus one");
+    assert_eq!(rows[1]["membersCount"], 2);
+    assert_eq!(rows[0]["createdAt"], "2026-01-02T03:04:05.678Z");
+    assert_eq!(v["data"]["total"], 2);
     rig.finish();
 }
 

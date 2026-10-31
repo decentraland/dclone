@@ -256,8 +256,8 @@ impl State {
 
     /// An explore state on `pool` for the tests' communities state: its
     /// catalogue reads only, never `spawn_jobs`.
-    #[cfg(test)]
-    pub(crate) fn explore_for_tests(pool: &PgPool) -> crate::explore::SharedState {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn explore_for_tests(pool: &PgPool) -> crate::explore::SharedState {
         Arc::new(crate::explore::ExploreState::new(
             pool.clone(),
             crate::explore::Settings::for_tests(),

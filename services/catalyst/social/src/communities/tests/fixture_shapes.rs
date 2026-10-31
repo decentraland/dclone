@@ -11,6 +11,7 @@
 //! shows up here.
 
 use std::collections::BTreeMap;
+use std::sync::LazyLock;
 
 use catalyst_testing::conformance::fixture::Fixture;
 
@@ -23,8 +24,26 @@ use crate::test_fixtures;
 const COMMUNITY: &str = "e99471aa-31c4-4952-abf6-99905445f43b";
 const PROFILE_CDN: &str = "https://profile-images.decentraland.org";
 
-fn fixture(name: &str) -> Fixture {
-    test_fixtures::fixture("social", name)
+/// The fixtures the rounds read, each parsed once.
+static FIXTURES: LazyLock<BTreeMap<&'static str, Fixture>> = LazyLock::new(|| {
+    [
+        "community-by-id",
+        "community-v2-by-id",
+        "community-members",
+        "community-v2-members",
+        "community-members-only-online",
+        "community-posts",
+        "community-posts-v2",
+        "community-places",
+        "member-communities",
+    ]
+    .into_iter()
+    .map(|name| (name, test_fixtures::fixture("social", name)))
+    .collect()
+});
+
+fn fixture(name: &str) -> &'static Fixture {
+    &FIXTURES[name]
 }
 
 fn rows<'a>(fx: &'a Fixture, key: &str) -> &'a Vec<Value> {
@@ -70,12 +89,17 @@ struct Seed<'a> {
 }
 
 impl Seed<'_> {
-    /// Removes what an earlier run left for the captured ids, then the
-    /// community as the by-id capture describes it.
+    /// Removes what an earlier run or round left for the captured ids (the
+    /// rows and the memoised profiles), then the community as the by-id
+    /// capture describes it.
     async fn community(&self) {
-        let by_id = fixture("community-by-id");
-        let data = &by_id.response.body_json.as_ref().unwrap()["data"];
+        let data = &fixture("community-by-id")
+            .response
+            .body_json
+            .as_ref()
+            .unwrap()["data"];
         self.clear().await;
+        self.rig.state.profiles.clear();
         self.community_row(
             COMMUNITY,
             data["name"].as_str().unwrap(),
@@ -101,7 +125,7 @@ impl Seed<'_> {
     async fn member(&self, id: &str, address: &str, role: &str, joined: &str) {
         sqlx::query(
             "INSERT INTO social.community_members (community_id, member_address, role, joined_at) \
-             VALUES ($1::uuid, $2, $3, $4) ON CONFLICT DO NOTHING",
+             VALUES ($1::uuid, $2, $3, $4) ON CONFLICT (community_id, member_address) DO NOTHING",
         )
         .bind(id)
         .bind(address)
@@ -230,8 +254,7 @@ impl Seed<'_> {
     /// Every row the captured ids own, so the database holds only what the
     /// test seeds (the community rows cascade to members, posts and places).
     async fn clear(&self) {
-        let member_communities = fixture("member-communities");
-        let ids: Vec<String> = rows(&member_communities, "results")
+        let ids: Vec<String> = rows(fixture("member-communities"), "results")
             .iter()
             .map(|r| r["id"].as_str().unwrap().to_string())
             .chain([COMMUNITY.to_string()])
@@ -248,13 +271,12 @@ impl Seed<'_> {
             "community-members-only-online",
             "community-posts",
         ] {
-            let fx = fixture(name);
             let key = if name.contains("posts") {
                 "posts"
             } else {
                 "results"
             };
-            for row in rows(&fx, key) {
+            for row in rows(fixture(name), key) {
                 for field in ["profilePictureUrl", "authorProfilePictureUrl"] {
                     if let Some(p) = row[field].as_str() {
                         entities.push(entity_of(p));
@@ -269,7 +291,7 @@ impl Seed<'_> {
         .execute(&self.rig.pool)
         .await
         .unwrap();
-        let places: Vec<String> = rows(&fixture("community-places"), "results")
+        let places: Vec<String> = rows(fixture("community-places"), "results")
             .iter()
             .map(|r| r["id"].as_str().unwrap().to_string())
             .collect();
@@ -326,7 +348,7 @@ async fn check(rig: &Rig, got: &mut BTreeMap<&'static str, Vec<String>>, names: 
     for &name in names {
         got.insert(
             name,
-            test_fixtures::replay(&rig.app, "/social-api", name, &fixture(name)).await,
+            test_fixtures::replay(&rig.app, "/social-api", name, fixture(name)).await,
         );
     }
 }
@@ -334,11 +356,11 @@ async fn check(rig: &Rig, got: &mut BTreeMap<&'static str, Vec<String>>, names: 
 /// One test: the captured ids are shared rows, so the seeds take turns.
 #[tokio::test]
 async fn the_data_bound_social_api_fixtures_replay_against_their_seeded_rows() {
-    let online: Vec<String> = rows(&fixture("community-members-only-online"), "results")
+    let online: Vec<String> = rows(fixture("community-members-only-online"), "results")
         .iter()
         .map(|r| r["memberAddress"].as_str().unwrap().to_string())
         .collect();
-    let Some(rig) = Rig::new(settings(Some(peers(online).await))).await else {
+    let Some(rig) = Rig::new(settings(Some(peers(online.clone()).await))).await else {
         return;
     };
     let seed = Seed { rig: &rig };
@@ -346,35 +368,34 @@ async fn the_data_bound_social_api_fixtures_replay_against_their_seeded_rows() {
 
     // the by-id pages, with the owner's profile (`ownerName`)
     seed.community().await;
-    let members = fixture("community-members");
-    seed.member_row(&rows(&members, "results")[0]).await;
+    seed.member_row(&rows(fixture("community-members"), "results")[0])
+        .await;
     check(&rig, &mut got, &["community-by-id", "community-v2-by-id"]).await;
 
-    // the member pages: each capture's rows alone
+    // the member pages: each capture's rows alone; the online page also
+    // holds the owner, offline (not in the presence set) and first in member
+    // order, so a page that ignored `onlyOnline` would differ
+    let owner = fixture("community-by-id")
+        .response
+        .body_json
+        .as_ref()
+        .unwrap()["data"]["ownerAddress"]
+        .as_str()
+        .unwrap()
+        .to_string();
     for name in [
         "community-members",
         "community-v2-members",
         "community-members-only-online",
     ] {
         seed.community().await;
-        let fx = fixture(name);
-        for row in rows(&fx, "results") {
+        for row in rows(fixture(name), "results") {
             seed.member_row(row).await;
         }
-        if name == "community-v2-members" {
-            // v2 rows carry no profile fields; the v1 capture names the same members' profiles
-            for row in rows(&members, "results") {
-                if let Some(p) = row["profilePictureUrl"].as_str() {
-                    seed.profile(
-                        row["memberAddress"].as_str().unwrap(),
-                        p,
-                        row["name"].as_str().unwrap(),
-                        row["hasClaimedName"].as_bool().unwrap(),
-                        row.get("nameColor"),
-                    )
-                    .await;
-                }
-            }
+        if name == "community-members-only-online" {
+            assert!(!online.contains(&owner), "the owner must be offline here");
+            seed.member(COMMUNITY, &owner, "owner", "2025-01-01T00:00:00.000Z")
+                .await;
         }
         check(&rig, &mut got, &[name]).await;
     }
@@ -382,10 +403,10 @@ async fn the_data_bound_social_api_fixtures_replay_against_their_seeded_rows() {
     // the posts, their authors' profiles and like counts
     seed.community().await;
     let posts = fixture("community-posts");
-    for row in rows(&posts, "posts") {
+    for row in rows(posts, "posts") {
         seed.post(row).await;
     }
-    let author = &rows(&posts, "posts")[0];
+    let author = &rows(posts, "posts")[0];
     seed.profile(
         author["authorAddress"].as_str().unwrap(),
         author["authorProfilePictureUrl"].as_str().unwrap(),
@@ -398,11 +419,7 @@ async fn the_data_bound_social_api_fixtures_replay_against_their_seeded_rows() {
 
     // the places, added by the owner, and their destinations in the catalogue
     seed.community().await;
-    let owner = fixture("community-by-id").response.body_json.unwrap()["data"]["ownerAddress"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    for row in rows(&fixture("community-places"), "results") {
+    for row in rows(fixture("community-places"), "results") {
         sqlx::query("INSERT INTO social.community_places (place_id, community_id, added_by) VALUES ($1, $2::uuid, $3)")
             .bind(row["id"].as_str().unwrap())
             .bind(COMMUNITY)
@@ -420,7 +437,7 @@ async fn the_data_bound_social_api_fixtures_replay_against_their_seeded_rows() {
     let mine = fixture("member-communities");
     for (joined, row) in ["2025-08-21T19:31:24.575Z", "2025-08-20T19:31:24.575Z"]
         .into_iter()
-        .zip(rows(&mine, "results"))
+        .zip(rows(mine, "results"))
     {
         let id = row["id"].as_str().unwrap();
         if id != COMMUNITY {
@@ -436,7 +453,7 @@ async fn the_data_bound_social_api_fixtures_replay_against_their_seeded_rows() {
             .await;
     }
     assert_eq!(
-        rows(&mine, "results").len(),
+        rows(mine, "results").len(),
         2,
         "one join time per captured row"
     );

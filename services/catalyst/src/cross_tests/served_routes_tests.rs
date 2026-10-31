@@ -189,11 +189,7 @@ impl Rig {
             crate::social::communities::Settings::for_tests(),
             None,
             &crate::http::Outbound::for_tests(),
-            Arc::new(crate::explore::ExploreState::new(
-                pool.clone(),
-                crate::explore::Settings::for_tests(),
-                None,
-            )),
+            crate::social::communities::State::explore_for_tests(&pool),
         ));
         let profile = Arc::new(crate::social::profile_images::ProfileImagesState::new(
             pool.clone(),

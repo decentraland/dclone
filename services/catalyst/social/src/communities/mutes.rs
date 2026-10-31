@@ -56,11 +56,7 @@ fn muted_address(body: &[u8]) -> Result<Address, CommError> {
         .and_then(serde_json::Value::as_str)
         .filter(|raw| !raw.is_empty())
         .ok_or_else(|| CommError::bad_request("muted_address is required"))?;
-    let invalid = || CommError::bad_request("Invalid muted_address");
-    if raw.trim() != raw {
-        return Err(invalid());
-    }
-    Address::parse(raw).map_err(|_| invalid())
+    Address::parse_untrimmed(raw).map_err(|_| CommError::bad_request("Invalid muted_address"))
 }
 
 pub async fn get_mutes(

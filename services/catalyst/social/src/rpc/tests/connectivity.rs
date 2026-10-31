@@ -10,8 +10,6 @@
 
 use super::*;
 
-const MEMBER_ROOT_KEY: &str = "8b3a350cf5c34c9194ca85829a2df0ec3153be0318b5e2d3348e872092edffba";
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_member_update_reaches_the_subscriber_only_when_current_and_co_member() {
     let Some(pool) = scratch_pool().await else {
@@ -20,7 +18,7 @@ async fn a_member_update_reaches_the_subscriber_only_when_current_and_co_member(
     // The server runs the private-voice expiry sweep against the scratch pool.
     let _turn = VOICE_TABLE.lock().await;
     let server = spawn_server(Some(pool.clone()), 5).await;
-    let (me, _client, social) = explorer(&server, MEMBER_ROOT_KEY).await;
+    let (me, _client, social) = explorer_as(&server, &PrivateKeySigner::random()).await;
     let community = seed_community(&pool, true, &me, "owner").await;
     let stranger = addr("cmc1");
     let mut updates = subscribed(
